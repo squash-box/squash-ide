@@ -107,6 +107,39 @@ func splitFrontmatter(content string) (string, string, error) {
 	return frontmatter, body, nil
 }
 
+// entityFrontmatter holds the fields we care about from entity page YAML.
+type entityFrontmatter struct {
+	Repo string `yaml:"repo"`
+}
+
+// ReadEntityRepo reads the entity page for the given project name and returns
+// its repo path. Entity pages live at wiki/entities/<project>.md.
+func ReadEntityRepo(vaultRoot, project string) (string, error) {
+	vaultRoot = expandHome(vaultRoot)
+	path := filepath.Join(vaultRoot, "wiki", "entities", project+".md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("reading entity page %s: %w", path, err)
+	}
+	fm, _, err := splitFrontmatter(string(data))
+	if err != nil {
+		return "", fmt.Errorf("parsing entity page %s: %w", path, err)
+	}
+	var ef entityFrontmatter
+	if err := yaml.Unmarshal([]byte(fm), &ef); err != nil {
+		return "", fmt.Errorf("unmarshaling entity frontmatter: %w", err)
+	}
+	if ef.Repo == "" {
+		return "", fmt.Errorf("entity page %s has no repo field", project)
+	}
+	return expandHome(ef.Repo), nil
+}
+
+// ExpandHome is the exported version of expandHome for use by other packages.
+func ExpandHome(path string) string {
+	return expandHome(path)
+}
+
 // expandHome replaces a leading ~ with the user's home directory.
 func expandHome(path string) string {
 	if !strings.HasPrefix(path, "~") {
