@@ -9,6 +9,7 @@ type Task struct {
 	Status   string   `json:"status" yaml:"status"`
 	Created  string   `json:"created" yaml:"created"`
 	Priority string   `json:"priority" yaml:"priority"`
+	Repo     string   `json:"repo,omitempty" yaml:"repo"`
 	Related  []string `json:"related,omitempty" yaml:"related"`
 	Body     string   `json:"body" yaml:"-"`
 }
