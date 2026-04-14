@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"os"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 	"github.com/squashbox/squash-ide/internal/task"
+	"github.com/squashbox/squash-ide/internal/ui"
 	"github.com/squashbox/squash-ide/internal/vault"
 )
 
@@ -16,6 +18,7 @@ func main() {
 	rootCmd := &cobra.Command{
 		Use:   "squash-ide",
 		Short: "Terminal task dispatcher for vault-based workflows",
+		RunE:  runTUI,
 	}
 
 	rootCmd.PersistentFlags().StringVar(&vaultPath, "vault", "~/GIT/agentic/tasks/personal/", "path to the Obsidian vault")
@@ -32,6 +35,13 @@ func main() {
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}
+}
+
+func runTUI(cmd *cobra.Command, args []string) error {
+	m := ui.New(vaultPath)
+	p := tea.NewProgram(m, tea.WithAltScreen())
+	_, err := p.Run()
+	return err
 }
 
 func runList(cmd *cobra.Command, args []string) error {
