@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/squashbox/squash-ide/internal/dispatch"
 	"github.com/squashbox/squash-ide/internal/task"
 	"github.com/squashbox/squash-ide/internal/vault"
 )
@@ -31,10 +32,10 @@ type displayItem struct {
 type Model struct {
 	vaultPath string
 
-	allTasks []task.Task // all loaded tasks
-	items    []displayItem // grouped display items (headers + tasks)
-	filtered []displayItem // items after filter applied
-	cursor   int           // index into filtered
+	allTasks []task.Task    // all loaded tasks
+	items    []displayItem  // grouped display items (headers + tasks)
+	filtered []displayItem  // items after filter applied
+	cursor   int            // index into filtered
 
 	filter       string
 	filterActive bool
@@ -46,6 +47,12 @@ type Model struct {
 	height int
 
 	err error
+
+	// Dispatch state
+	confirming  *task.Task // non-nil when confirmation dialog is showing
+	dispatching bool       // true while dispatch is in progress
+	statusMsg   string     // transient message for status bar
+	statusIsErr bool       // whether statusMsg is an error
 }
 
 // New creates a new Model for the given vault path.
@@ -65,9 +72,29 @@ type tasksLoadedMsg struct {
 	err   error
 }
 
+type dispatchDoneMsg struct {
+	taskID string
+	branch string
+}
+
+type dispatchErrMsg struct {
+	err error
+}
+
 func (m Model) loadTasks() tea.Msg {
 	tasks, err := vault.ReadAll(m.vaultPath)
 	return tasksLoadedMsg{tasks: tasks, err: err}
+}
+
+func (m Model) runDispatch(t task.Task) tea.Cmd {
+	vaultPath := m.vaultPath
+	return func() tea.Msg {
+		res, err := dispatch.Run(vaultPath, t)
+		if err != nil {
+			return dispatchErrMsg{err: err}
+		}
+		return dispatchDoneMsg{taskID: t.ID, branch: res.Branch}
+	}
 }
 
 // Update handles messages.
@@ -93,6 +120,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.clampCursor()
 		return m, nil
 
+	case dispatchDoneMsg:
+		m.dispatching = false
+		m.statusMsg = fmt.Sprintf("spawned %s", msg.taskID)
+		m.statusIsErr = false
+		return m, m.loadTasks
+
+	case dispatchErrMsg:
+		m.dispatching = false
+		m.statusMsg = msg.err.Error()
+		m.statusIsErr = true
+		return m, nil
+
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
@@ -100,6 +139,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Confirmation dialog
+	if m.confirming != nil {
+		return m.handleConfirmKey(msg)
+	}
+
 	// Filter input mode
 	if m.filterActive {
 		return m.handleFilterKey(msg)
@@ -112,6 +156,22 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// List view
 	return m.handleListKey(msg)
+}
+
+func (m Model) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case key.Matches(msg, keys.Confirm), key.Matches(msg, keys.Enter):
+		t := *m.confirming
+		m.confirming = nil
+		m.dispatching = true
+		m.statusMsg = fmt.Sprintf("spawning %s...", t.ID)
+		m.statusIsErr = false
+		return m, m.runDispatch(t)
+	case key.Matches(msg, keys.Deny), key.Matches(msg, keys.Back):
+		m.confirming = nil
+		return m, nil
+	}
+	return m, nil
 }
 
 func (m Model) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -152,6 +212,9 @@ func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Clear status message on any keypress
+	m.statusMsg = ""
+
 	switch {
 	case key.Matches(msg, keys.Quit):
 		return m, tea.Quit
@@ -163,6 +226,22 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.moveCursor(1)
 
 	case key.Matches(msg, keys.Enter):
+		if item := m.selectedItem(); item != nil && !item.isHeader {
+			if item.task.Status == "backlog" {
+				if m.dispatching {
+					m.statusMsg = "dispatch already in progress"
+					m.statusIsErr = true
+					return m, nil
+				}
+				t := item.task
+				m.confirming = &t
+			} else {
+				m.statusMsg = fmt.Sprintf("%s is already %s", item.task.ID, item.task.Status)
+				m.statusIsErr = false
+			}
+		}
+
+	case key.Matches(msg, keys.Detail):
 		if item := m.selectedItem(); item != nil && !item.isHeader {
 			m.view = detailView
 			m.updateDetailContent()
@@ -339,6 +418,13 @@ func (m Model) listViewRender() string {
 		rendered++
 	}
 
+	// Confirmation dialog overlay
+	if m.confirming != nil {
+		b.WriteString(confirmBoxStyle.Render(
+			fmt.Sprintf("Spawn %s? [y/N]", m.confirming.ID)))
+		b.WriteString("\n")
+	}
+
 	// Filter bar
 	if m.filterActive {
 		b.WriteString(filterPromptStyle.Render("/") + filterInputStyle.Render(m.filter+"█"))
@@ -354,10 +440,12 @@ func (m Model) listViewRender() string {
 	b.WriteString("\n")
 
 	// Help
-	if m.filterActive {
+	if m.confirming != nil {
+		b.WriteString(helpStyle.Render("[y/enter] confirm  [n/esc] cancel"))
+	} else if m.filterActive {
 		b.WriteString(helpStyle.Render("[enter] apply  [esc] clear  [type] filter"))
 	} else {
-		b.WriteString(helpStyle.Render("[↑↓/jk] navigate  [enter] detail  [/] filter  [r] refresh  [q] quit"))
+		b.WriteString(helpStyle.Render("[↑↓/jk] navigate  [enter] spawn  [tab] detail  [/] filter  [r] refresh  [q] quit"))
 	}
 	b.WriteString("\n")
 
@@ -370,6 +458,17 @@ func (m Model) detailViewRender() string {
 }
 
 func (m Model) renderStatusBar() string {
+	// Show transient status message if present
+	if m.statusMsg != "" {
+		if m.dispatching {
+			return dispatchingStyle.Render(m.statusMsg)
+		}
+		if m.statusIsErr {
+			return statusErrorStyle.Render(m.statusMsg)
+		}
+		return statusSuccessStyle.Render(m.statusMsg)
+	}
+
 	counts := map[string]int{}
 	for _, t := range m.allTasks {
 		counts[t.Status]++
