@@ -79,7 +79,9 @@ func TestBuildItems_StatusOrder(t *testing.T) {
 			headerOrder = append(headerOrder, item.header)
 		}
 	}
-	expected := []string{"backlog", "active", "blocked"}
+	// Active is surfaced first to match the card-layout mockup; backlog
+	// follows, then blocked.
+	expected := []string{"active", "backlog", "blocked"}
 	if len(headerOrder) != len(expected) {
 		t.Fatalf("header count %d != expected %d", len(headerOrder), len(expected))
 	}
@@ -93,47 +95,50 @@ func TestBuildItems_StatusOrder(t *testing.T) {
 func TestCursorSkipsHeaders(t *testing.T) {
 	m := modelWithTasks(testTasks())
 
-	// Cursor should start on first task, not the header
+	// Cursor should start on first task, not the header. With active-first
+	// section ordering, that's T-003 (the only active task in the fixture).
 	if m.cursor < 0 || m.cursor >= len(m.filtered) {
 		t.Fatalf("cursor %d out of range", m.cursor)
 	}
 	if m.filtered[m.cursor].isHeader {
 		t.Error("cursor should not be on a header")
 	}
-	if m.filtered[m.cursor].task.ID != "T-001" {
-		t.Errorf("cursor should be on T-001, got %s", m.filtered[m.cursor].task.ID)
+	if m.filtered[m.cursor].task.ID != "T-003" {
+		t.Errorf("cursor should be on T-003 (first active), got %s", m.filtered[m.cursor].task.ID)
 	}
 }
 
 func TestMoveCursor(t *testing.T) {
 	m := modelWithTasks(testTasks())
+	// Order with active-first sections:
+	//   T-003 (active) → T-001 (backlog) → T-002 (backlog) → T-004 (blocked)
 
-	// Move down to second task
+	// Move down — should skip the "backlog" header to T-001.
+	m.moveCursor(1)
+	if m.filtered[m.cursor].task.ID != "T-001" {
+		t.Errorf("expected T-001 (skipping header), got %s", m.filtered[m.cursor].task.ID)
+	}
+
+	// Move down to T-002.
 	m.moveCursor(1)
 	if m.filtered[m.cursor].task.ID != "T-002" {
 		t.Errorf("expected T-002, got %s", m.filtered[m.cursor].task.ID)
 	}
 
-	// Move down again — should skip "active" header to T-003
-	m.moveCursor(1)
-	if m.filtered[m.cursor].task.ID != "T-003" {
-		t.Errorf("expected T-003 (skipping header), got %s", m.filtered[m.cursor].task.ID)
-	}
-
-	// Move up — should skip header back to T-002
+	// Move up — should skip nothing, back to T-001.
 	m.moveCursor(-1)
-	if m.filtered[m.cursor].task.ID != "T-002" {
-		t.Errorf("expected T-002 (skipping header), got %s", m.filtered[m.cursor].task.ID)
+	if m.filtered[m.cursor].task.ID != "T-001" {
+		t.Errorf("expected T-001, got %s", m.filtered[m.cursor].task.ID)
 	}
 }
 
 func TestMoveCursor_BoundsCheck(t *testing.T) {
 	m := modelWithTasks(testTasks())
 
-	// Move up from first item — should stay
+	// Move up from first item — should stay on T-003 (first active).
 	m.moveCursor(-1)
-	if m.filtered[m.cursor].task.ID != "T-001" {
-		t.Errorf("should stay on T-001, got %s", m.filtered[m.cursor].task.ID)
+	if m.filtered[m.cursor].task.ID != "T-003" {
+		t.Errorf("should stay on T-003, got %s", m.filtered[m.cursor].task.ID)
 	}
 
 	// Move to last item
@@ -246,24 +251,43 @@ func TestEmptyVault(t *testing.T) {
 	}
 }
 
-func TestStatusBar_Counts(t *testing.T) {
+func TestTopBar_Counts(t *testing.T) {
+	m := modelWithTasks(testTasks())
+	v := m.View()
+
+	// Per-status counts now live in the top header alongside the app name.
+	if !containsAll(v, "2 backlog", "1 active", "1 blocked") {
+		t.Errorf("top bar missing expected counts in view:\n%s", v)
+	}
+}
+
+func TestStatusBar_VaultHintWhenIdle(t *testing.T) {
 	m := modelWithTasks(testTasks())
 	bar := m.renderStatusBar()
 
-	if bar == "" {
-		t.Error("status bar is empty")
-	}
-	// Should contain counts
-	if !containsAll(bar, "2 backlog", "1 active", "1 blocked") {
-		t.Errorf("status bar missing expected counts: %s", bar)
+	if !containsAll(bar, "Vault: /fake/vault") {
+		t.Errorf("status bar should show vault hint when idle: %s", bar)
 	}
 }
 
 // --- T-008: dispatch wiring tests ---
 
+// moveCursorToID navigates the test model's cursor to the task with the
+// given id, failing the test if it isn't reachable.
+func moveCursorToID(t *testing.T, m *Model, id string) {
+	t.Helper()
+	for i := 0; i < len(m.filtered)*2; i++ {
+		if !m.filtered[m.cursor].isHeader && m.filtered[m.cursor].task.ID == id {
+			return
+		}
+		m.moveCursor(1)
+	}
+	t.Fatalf("could not navigate cursor to %s", id)
+}
+
 func TestEnterOnBacklogTask_ShowsConfirm(t *testing.T) {
 	m := modelWithTasks(testTasks())
-	// Cursor is on T-001 (backlog)
+	moveCursorToID(t, &m, "T-001")
 
 	result, _ := m.Update(enterKeyMsg())
 	updated := result.(Model)
@@ -278,10 +302,7 @@ func TestEnterOnBacklogTask_ShowsConfirm(t *testing.T) {
 
 func TestEnterOnActiveTask_ShowsAlreadyStatus(t *testing.T) {
 	m := modelWithTasks(testTasks())
-	// Move cursor to T-003 (active)
-	m.moveCursor(1) // T-002
-	m.moveCursor(1) // T-003
-
+	// Cursor starts on T-003 (active) under active-first ordering.
 	if m.filtered[m.cursor].task.ID != "T-003" {
 		t.Fatalf("expected cursor on T-003, got %s", m.filtered[m.cursor].task.ID)
 	}
@@ -299,14 +320,7 @@ func TestEnterOnActiveTask_ShowsAlreadyStatus(t *testing.T) {
 
 func TestEnterOnBlockedTask_ShowsAlreadyStatus(t *testing.T) {
 	m := modelWithTasks(testTasks())
-	// Move cursor to T-004 (blocked)
-	m.moveCursor(1) // T-002
-	m.moveCursor(1) // T-003
-	m.moveCursor(1) // T-004
-
-	if m.filtered[m.cursor].task.ID != "T-004" {
-		t.Fatalf("expected cursor on T-004, got %s", m.filtered[m.cursor].task.ID)
-	}
+	moveCursorToID(t, &m, "T-004")
 
 	result, _ := m.Update(enterKeyMsg())
 	updated := result.(Model)
@@ -391,6 +405,7 @@ func TestConfirmDialog_EscCancels(t *testing.T) {
 
 func TestConfirmDialog_RendersInView(t *testing.T) {
 	m := modelWithTasks(testTasks())
+	moveCursorToID(t, &m, "T-001")
 	backlogTask := m.filtered[m.cursor].task
 	m.confirming = &backlogTask
 
@@ -484,6 +499,9 @@ func TestTabOpensDetailView(t *testing.T) {
 
 func TestEnterDuringDispatch_ShowsWarning(t *testing.T) {
 	m := modelWithTasks(testTasks())
+	// Cursor must be on a backlog task — the dispatch-in-progress check
+	// only fires on the spawn path.
+	moveCursorToID(t, &m, "T-001")
 	m.dispatching = true
 
 	result, _ := m.Update(enterKeyMsg())

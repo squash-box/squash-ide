@@ -2,70 +2,110 @@ package ui
 
 import "github.com/charmbracelet/lipgloss"
 
+// Color palette — kept centralised so the card layout stays internally
+// consistent. Names map roughly to roles, not literal colors, so a future
+// theme swap touches one place.
 var (
-	titleStyle = lipgloss.NewStyle().
+	colorAccent  = lipgloss.Color("170") // app title / cursor accent (pink)
+	colorMuted   = lipgloss.Color("243") // dim text (counts, project, footer)
+	colorDivider = lipgloss.Color("238") // section dividers
+	colorSection = lipgloss.Color("99")  // section bar (purple)
+	colorWorking = lipgloss.Color("78")  // green badge bg
+	colorIdle    = lipgloss.Color("214") // amber badge bg
+	colorNeeds   = lipgloss.Color("204") // pink badge bg
+	colorBadgeFg = lipgloss.Color("235") // dark text on light badge bg
+	colorOnDark  = lipgloss.Color("229") // light text on dark bg
+)
+
+// --- Top bar ----------------------------------------------------------------
+
+var (
+	appTitleStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("170")).
-			PaddingLeft(1)
+			Foreground(colorAccent)
 
-	statusHeaderStyle = lipgloss.NewStyle().
-				Bold(true).
-				Foreground(lipgloss.Color("243")).
-				PaddingLeft(1)
+	countsStyle = lipgloss.NewStyle().
+			Foreground(colorMuted)
 
-	selectedStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("229")).
-			Background(lipgloss.Color("57")).
-			PaddingLeft(1).
-			PaddingRight(1)
+	dividerStyle = lipgloss.NewStyle().
+			Foreground(colorDivider)
+)
 
-	normalStyle = lipgloss.NewStyle().
-			PaddingLeft(2)
+// --- Section headers --------------------------------------------------------
 
-	detailTitleStyle = lipgloss.NewStyle().
-				Bold(true).
-				Foreground(lipgloss.Color("170")).
-				PaddingLeft(1).
-				PaddingBottom(1)
+var (
+	sectionBarStyle = lipgloss.NewStyle().
+			Foreground(colorSection).
+			Bold(true)
 
-	detailBodyStyle = lipgloss.NewStyle().
-			PaddingLeft(2)
-
-	statusBarStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("243")).
-			PaddingLeft(1)
-
-	filterPromptStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("205")).
+	sectionLabelStyle = lipgloss.NewStyle().
+				Foreground(colorMuted).
 				Bold(true)
+)
 
-	filterInputStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("229"))
+// --- Status badges (active sub-states) --------------------------------------
 
+var (
+	badgeWorkingStyle = lipgloss.NewStyle().
+				Background(colorWorking).
+				Foreground(colorBadgeFg).
+				Bold(true).
+				Padding(0, 1)
+
+	badgeIdleStyle = lipgloss.NewStyle().
+			Background(colorIdle).
+			Foreground(colorBadgeFg).
+			Bold(true).
+			Padding(0, 1)
+
+	badgeNeedsStyle = lipgloss.NewStyle().
+			Background(colorNeeds).
+			Foreground(colorBadgeFg).
+			Bold(true).
+			Padding(0, 1)
+)
+
+// --- Task card --------------------------------------------------------------
+
+var (
+	taskIDStyle = lipgloss.NewStyle().
+			Bold(true)
+
+	taskTitleStyle = lipgloss.NewStyle()
+
+	projectDimStyle = lipgloss.NewStyle().
+			Foreground(colorMuted)
+
+	progressOnStyle = lipgloss.NewStyle().
+			Foreground(colorWorking)
+
+	progressOffStyle = lipgloss.NewStyle().
+				Foreground(colorDivider)
+
+	// Left accent bar for the selected card.
+	cursorBarStyle = lipgloss.NewStyle().
+			Foreground(colorAccent).
+			Bold(true)
+)
+
+// --- Footer / status / dialogs ----------------------------------------------
+
+var (
 	helpStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("241")).
 			PaddingLeft(1)
 
 	emptyStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("243")).
+			Foreground(colorMuted).
 			PaddingLeft(2).
 			PaddingTop(1)
 
-	typeStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("243"))
-
-	projectStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("109"))
-
-	confirmBoxStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("205")).
-			Padding(0, 2).
-			Bold(true)
+	statusBarStyle = lipgloss.NewStyle().
+			Foreground(colorMuted).
+			PaddingLeft(1)
 
 	statusSuccessStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("78")).
+				Foreground(colorWorking).
 				PaddingLeft(1)
 
 	statusErrorStyle = lipgloss.NewStyle().
@@ -73,20 +113,46 @@ var (
 				PaddingLeft(1)
 
 	dispatchingStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("229")).
+				Foreground(colorOnDark).
 				PaddingLeft(1).
 				Bold(true)
 
-	activeIndicatorStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("78")).
+	filterPromptStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("205")).
 				Bold(true)
+
+	filterInputStyle = lipgloss.NewStyle().
+				Foreground(colorOnDark)
+
+	confirmBoxStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("205")).
+			Padding(0, 2).
+			Bold(true)
 
 	inputBoxStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("229")).
+			BorderForeground(colorOnDark).
 			Padding(0, 2)
+)
+
+// --- Detail view ------------------------------------------------------------
+
+var (
+	detailTitleStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(colorAccent).
+				PaddingLeft(1).
+				PaddingBottom(1)
+
+	detailBodyStyle = lipgloss.NewStyle().
+			PaddingLeft(2)
 
 	worktreeStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("109")).
 			PaddingLeft(2)
+
+	activeIndicatorStyle = lipgloss.NewStyle().
+				Foreground(colorWorking).
+				Bold(true)
 )

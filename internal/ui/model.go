@@ -7,7 +7,6 @@ import (
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 	"github.com/squashbox/squash-ide/internal/config"
 	"github.com/squashbox/squash-ide/internal/dispatch"
 	"github.com/squashbox/squash-ide/internal/task"
@@ -443,9 +442,11 @@ func (m *Model) selectedItem() *displayItem {
 }
 
 // buildItems groups tasks by status into display items with headers.
+// The order — active, backlog, blocked — surfaces the work in flight
+// first, matching the card-layout mockup.
 func (m *Model) buildItems() {
 	m.items = nil
-	statusOrder := []string{"backlog", "active", "blocked"}
+	statusOrder := []string{"active", "backlog", "blocked"}
 	grouped := map[string][]task.Task{}
 	for _, t := range m.allTasks {
 		grouped[t.Status] = append(grouped[t.Status], t)
@@ -532,10 +533,18 @@ func (m Model) View() string {
 }
 
 func (m Model) listViewRender() string {
+	width := m.width
+	if width < 40 {
+		width = 40
+	}
+
 	var b strings.Builder
 
-	// Title
-	b.WriteString(titleStyle.Render("squash-ide"))
+	// Top bar: app name + per-status counts.
+	counts := m.statusCounts()
+	b.WriteString(renderTopBar(width, "squash-ide", "", counts))
+	b.WriteString("\n")
+	b.WriteString(renderDivider(width))
 	b.WriteString("\n")
 
 	if len(m.allTasks) == 0 {
@@ -548,37 +557,22 @@ func (m Model) listViewRender() string {
 		return b.String()
 	}
 
-	// List items
-	listHeight := m.height - 4 // reserve for title, status bar, help, filter
-	if listHeight < 1 {
-		listHeight = 10
+	// Reserve rows: top bar + divider + (filter row?) + status bar + help.
+	chrome := 4
+	if m.filterActive || m.filter != "" {
+		chrome++
+	}
+	if m.confirming != nil || m.completing != nil || m.blocking != nil {
+		chrome += 3 // dialog box height (border + content + border)
+	}
+	listHeight := m.height - chrome
+	if listHeight < 5 {
+		listHeight = 5
 	}
 
-	// Calculate scroll offset to keep cursor visible
-	start := 0
-	if m.cursor >= listHeight {
-		start = m.cursor - listHeight + 1
-	}
+	b.WriteString(m.renderCardList(width, listHeight))
 
-	rendered := 0
-	for i := start; i < len(m.filtered) && rendered < listHeight; i++ {
-		item := m.filtered[i]
-		if item.isHeader {
-			b.WriteString(statusHeaderStyle.Render(fmt.Sprintf("─── %s ───", item.header)))
-			b.WriteString("\n")
-		} else {
-			line := formatTaskLine(item.task)
-			if i == m.cursor {
-				b.WriteString(selectedStyle.Render("► " + line))
-			} else {
-				b.WriteString(normalStyle.Render("  " + line))
-			}
-			b.WriteString("\n")
-		}
-		rendered++
-	}
-
-	// Dialog overlays
+	// Dialog overlays.
 	if m.confirming != nil {
 		b.WriteString(confirmBoxStyle.Render(
 			fmt.Sprintf("Spawn %s? [y/N]", m.confirming.ID)))
@@ -603,7 +597,7 @@ func (m Model) listViewRender() string {
 		b.WriteString("\n")
 	}
 
-	// Status bar
+	// Status bar (transient messages only — counts moved to top bar).
 	b.WriteString(m.renderStatusBar())
 	b.WriteString("\n")
 
@@ -616,11 +610,84 @@ func (m Model) listViewRender() string {
 	case m.filterActive:
 		b.WriteString(helpStyle.Render("[enter] apply  [esc] clear  [type] filter"))
 	default:
-		b.WriteString(helpStyle.Render("[↑↓/jk] nav  [enter] spawn  [c] complete  [b] block  [tab] detail  [/] filter  [r] refresh  [q] quit"))
+		b.WriteString(helpStyle.Render("j/k nav  enter spawn  c complete  b block  tab detail  / filter  r refresh  q quit"))
 	}
 	b.WriteString("\n")
 
 	return b.String()
+}
+
+// renderCardList renders the per-section card list, scrolling to keep the
+// cursor visible. Cards have variable height (active = 3 lines, backlog = 2)
+// so we render to a flat line buffer first, find the cursor card's line
+// range, then slice.
+func (m Model) renderCardList(width, height int) string {
+	var (
+		lines       []string
+		cursorStart = -1
+		cursorEnd   = -1
+	)
+
+	for i, item := range m.filtered {
+		if item.isHeader {
+			// Section header gets a leading blank for breathing room
+			// (skipped at the very top of the list).
+			if len(lines) > 0 {
+				lines = append(lines, "")
+			}
+			lines = append(lines, renderSectionHeader(item.header))
+			lines = append(lines, "")
+			continue
+		}
+
+		selected := i == m.cursor
+		card := renderCard(item.task, selected, width)
+
+		if selected {
+			cursorStart = len(lines)
+			cursorEnd = len(lines) + len(card) - 1
+		}
+		lines = append(lines, card...)
+		// Spacer between cards.
+		lines = append(lines, "")
+	}
+
+	// Trim trailing blank.
+	for len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+
+	// Scroll: keep cursor card fully visible.
+	start := 0
+	if cursorEnd >= 0 && len(lines) > height {
+		switch {
+		case cursorEnd-cursorStart+1 > height:
+			start = cursorStart
+		case cursorEnd >= height:
+			start = cursorEnd - height + 1
+		}
+		if start < 0 {
+			start = 0
+		}
+		if start > len(lines)-height {
+			start = len(lines) - height
+		}
+	}
+	end := start + height
+	if end > len(lines) {
+		end = len(lines)
+	}
+
+	return strings.Join(lines[start:end], "\n") + "\n"
+}
+
+// statusCounts returns a {status: count} map across all loaded tasks.
+func (m Model) statusCounts() map[string]int {
+	counts := map[string]int{}
+	for _, t := range m.allTasks {
+		counts[t.Status]++
+	}
+	return counts
 }
 
 func (m Model) detailViewRender() string {
@@ -628,8 +695,10 @@ func (m Model) detailViewRender() string {
 	return m.viewport.View() + "\n" + header + "\n"
 }
 
+// renderStatusBar shows transient feedback (success / error / dispatching)
+// or a quiet vault hint when idle. Per-status counts now live in the top
+// bar, so the bottom bar stays free for the message of the moment.
 func (m Model) renderStatusBar() string {
-	// Show transient status message if present
 	if m.statusMsg != "" {
 		if m.dispatching {
 			return dispatchingStyle.Render(m.statusMsg)
@@ -639,30 +708,5 @@ func (m Model) renderStatusBar() string {
 		}
 		return statusSuccessStyle.Render(m.statusMsg)
 	}
-
-	counts := map[string]int{}
-	for _, t := range m.allTasks {
-		counts[t.Status]++
-	}
-	parts := []string{fmt.Sprintf("Vault: %s", m.vaultPath)}
-	for _, s := range []string{"backlog", "active", "blocked"} {
-		if c := counts[s]; c > 0 {
-			parts = append(parts, fmt.Sprintf("%d %s", c, s))
-		}
-	}
-	return statusBarStyle.Render(strings.Join(parts, " • "))
-}
-
-func formatTaskLine(t task.Task) string {
-	id := t.ID
-	typ := typeStyle.Render(fmt.Sprintf("[%s]", t.Type))
-	title := t.Title
-	proj := projectStyle.Render(t.Project)
-
-	indicator := " "
-	if t.Status == "active" {
-		indicator = activeIndicatorStyle.Render(activeIndicator)
-	}
-
-	return lipgloss.JoinHorizontal(lipgloss.Top, indicator, " ", id, " ", typ, " ", title, " ", proj)
+	return statusBarStyle.Render(fmt.Sprintf("Vault: %s", m.vaultPath))
 }
