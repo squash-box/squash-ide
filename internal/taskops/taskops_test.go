@@ -239,3 +239,269 @@ func TestInsertActiveRow_ExistingTable(t *testing.T) {
 		t.Error("new row not inserted")
 	}
 }
+
+// setupActiveTestVault returns a vault with T-099 already in active/ and
+// its row in the Active section of board.md. Used for the cleanup tests.
+func setupActiveTestVault(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+
+	for _, dir := range []string{
+		"tasks/backlog", "tasks/active", "tasks/blocked", "tasks/archive",
+		"wiki/entities", "wiki",
+	} {
+		if err := os.MkdirAll(filepath.Join(root, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	taskContent := `---
+id: T-099
+type: feature
+title: Test task for cleanup
+project: test-proj
+status: active
+created: 2026-04-01
+priority: high
+started: 2026-04-14
+---
+
+# T-099 — Test task for cleanup
+
+Body content here.
+`
+	if err := os.WriteFile(filepath.Join(root, "tasks/active/T-099-test-task.md"), []byte(taskContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	boardContent := `---
+type: board
+title: Test Board
+last_updated: 2026-04-01
+
+---
+
+# Task Board
+
+## Active
+
+| ID | Project | Title | Type |
+|----|---------|-------|------|
+| [[T-099]] | test-proj | Test task for cleanup | feature |
+
+## Backlog
+
+_None_
+
+## Blocked
+
+_None_
+
+## Recently Completed
+
+_None_
+`
+	if err := os.WriteFile(filepath.Join(root, "tasks/board.md"), []byte(boardContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	logContent := `---
+type: log
+title: Test Log
+---
+
+# Activity Log
+
+## [2026-04-01] init | Test vault created
+Initial setup.
+`
+	if err := os.WriteFile(filepath.Join(root, "wiki/log.md"), []byte(logContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	return root
+}
+
+func TestMoveToArchive(t *testing.T) {
+	root := setupActiveTestVault(t)
+	tk := task.Task{
+		ID:     "T-099",
+		Status: "active",
+		Title:  "Test task for cleanup",
+	}
+
+	newPath, err := MoveToArchive(root, tk, "feat/T-099-test", "")
+	if err != nil {
+		t.Fatalf("MoveToArchive: %v", err)
+	}
+
+	oldPath := filepath.Join(root, "tasks/active/T-099-test-task.md")
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Error("old task file still exists in active/")
+	}
+	if _, err := os.Stat(newPath); err != nil {
+		t.Fatalf("archived task file missing: %v", err)
+	}
+
+	data, _ := os.ReadFile(newPath)
+	content := string(data)
+	if !strings.Contains(content, "status: done") {
+		t.Errorf("status not set to done: %s", content)
+	}
+	if !strings.Contains(content, "completed: ") {
+		t.Error("completed field not added")
+	}
+	if !strings.Contains(content, "branch: feat/T-099-test") {
+		t.Error("branch field not recorded")
+	}
+}
+
+func TestMoveToBlocked(t *testing.T) {
+	root := setupActiveTestVault(t)
+	tk := task.Task{
+		ID:     "T-099",
+		Status: "active",
+		Title:  "Test task for cleanup",
+	}
+
+	newPath, err := MoveToBlocked(root, tk, "waiting on upstream fix")
+	if err != nil {
+		t.Fatalf("MoveToBlocked: %v", err)
+	}
+
+	oldPath := filepath.Join(root, "tasks/active/T-099-test-task.md")
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Error("old task file still exists in active/")
+	}
+	if _, err := os.Stat(newPath); err != nil {
+		t.Fatalf("blocked task file missing: %v", err)
+	}
+
+	data, _ := os.ReadFile(newPath)
+	content := string(data)
+	if !strings.Contains(content, "status: blocked") {
+		t.Error("status not set to blocked")
+	}
+	if !strings.Contains(content, "## Blocked") {
+		t.Error("body not appended with Blocked section")
+	}
+	if !strings.Contains(content, "waiting on upstream fix") {
+		t.Error("reason not recorded in body")
+	}
+}
+
+func TestUpdateBoardComplete(t *testing.T) {
+	root := setupActiveTestVault(t)
+	tk := task.Task{
+		ID:      "T-099",
+		Project: "test-proj",
+		Title:   "Test task for cleanup",
+		Type:    "feature",
+	}
+
+	if err := UpdateBoardComplete(root, tk); err != nil {
+		t.Fatalf("UpdateBoardComplete: %v", err)
+	}
+
+	data, _ := os.ReadFile(filepath.Join(root, "tasks/board.md"))
+	content := string(data)
+
+	completedIdx := strings.Index(content, "## Recently Completed")
+	taskIdx := strings.Index(content, "[[T-099]]")
+	if completedIdx < 0 || taskIdx < completedIdx {
+		t.Errorf("task row not in Recently Completed section; content:\n%s", content)
+	}
+
+	// Active section should not contain the task anymore.
+	activeIdx := strings.Index(content, "## Active")
+	activeEnd := strings.Index(content, "## Backlog")
+	if strings.Contains(content[activeIdx:activeEnd], "[[T-099]]") {
+		t.Error("task still present in Active section")
+	}
+}
+
+func TestUpdateBoardBlock(t *testing.T) {
+	root := setupActiveTestVault(t)
+	tk := task.Task{
+		ID:      "T-099",
+		Project: "test-proj",
+		Title:   "Test task for cleanup",
+		Type:    "feature",
+	}
+
+	if err := UpdateBoardBlock(root, tk); err != nil {
+		t.Fatalf("UpdateBoardBlock: %v", err)
+	}
+
+	data, _ := os.ReadFile(filepath.Join(root, "tasks/board.md"))
+	content := string(data)
+
+	blockedIdx := strings.Index(content, "## Blocked")
+	completedIdx := strings.Index(content, "## Recently Completed")
+	taskIdx := strings.Index(content, "[[T-099]]")
+	if taskIdx < blockedIdx || taskIdx > completedIdx {
+		t.Errorf("task row not in Blocked section; content:\n%s", content)
+	}
+
+	// Active section should not contain the task anymore.
+	activeIdx := strings.Index(content, "## Active")
+	activeEnd := strings.Index(content, "## Backlog")
+	if strings.Contains(content[activeIdx:activeEnd], "[[T-099]]") {
+		t.Error("task still present in Active section")
+	}
+}
+
+func TestAppendLogComplete(t *testing.T) {
+	root := setupActiveTestVault(t)
+	tk := task.Task{ID: "T-099", Title: "Test task for cleanup"}
+	if err := AppendLogComplete(root, tk, "feat/T-099-test"); err != nil {
+		t.Fatalf("AppendLogComplete: %v", err)
+	}
+	data, _ := os.ReadFile(filepath.Join(root, "wiki/log.md"))
+	content := string(data)
+	if !strings.Contains(content, "complete | T-099") {
+		t.Errorf("log entry missing complete operation: %s", content)
+	}
+}
+
+func TestAppendLogBlock(t *testing.T) {
+	root := setupActiveTestVault(t)
+	tk := task.Task{ID: "T-099", Title: "Test task for cleanup"}
+	if err := AppendLogBlock(root, tk, "waiting on X"); err != nil {
+		t.Fatalf("AppendLogBlock: %v", err)
+	}
+	data, _ := os.ReadFile(filepath.Join(root, "wiki/log.md"))
+	content := string(data)
+	if !strings.Contains(content, "block | T-099") {
+		t.Errorf("log entry missing block operation: %s", content)
+	}
+	if !strings.Contains(content, "waiting on X") {
+		t.Error("reason missing from log entry")
+	}
+}
+
+func TestHasFrontmatterField(t *testing.T) {
+	input := "---\nid: T-001\nstatus: backlog\n---\n# Body\n"
+	if !hasFrontmatterField(input, "status") {
+		t.Error("should detect existing field")
+	}
+	if hasFrontmatterField(input, "completed") {
+		t.Error("should not detect missing field")
+	}
+	// Ensure we don't match the field when it appears in body.
+	bodyOnly := "---\nid: T-001\n---\n# Body\ncompleted: yes\n"
+	if hasFrontmatterField(bodyOnly, "completed") {
+		t.Error("should not match fields outside frontmatter")
+	}
+}
+
+func TestAddFrontmatterFieldReplacesExisting(t *testing.T) {
+	input := "---\nid: T-001\nstatus: backlog\n---\n# Body\n"
+	got := addFrontmatterField(input, "status", "done")
+	if !strings.Contains(got, "status: done") {
+		t.Error("existing field not updated")
+	}
+	if strings.Contains(got, "status: backlog") {
+		t.Error("old value still present after replacement")
+	}
+}

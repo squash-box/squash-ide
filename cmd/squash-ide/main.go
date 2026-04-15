@@ -16,6 +16,11 @@ import (
 	"github.com/squashbox/squash-ide/internal/vault"
 )
 
+// version is set via -ldflags "-X main.version=vX.Y.Z" at build time.
+// The default is "dev" for local builds; the Makefile sets the real tag
+// when producing release artifacts.
+var version = "dev"
+
 // Flag values, populated by cobra before RunE runs. Empty string = not set.
 var (
 	flagVault        string
@@ -29,10 +34,12 @@ var (
 
 func main() {
 	rootCmd := &cobra.Command{
-		Use:   "squash-ide",
-		Short: "Terminal task dispatcher for vault-based workflows",
-		RunE:  runTUI,
+		Use:     "squash-ide",
+		Short:   "Terminal task dispatcher for vault-based workflows",
+		Version: version,
+		RunE:    runTUI,
 	}
+	rootCmd.SetVersionTemplate("squash-ide {{.Version}}\n")
 
 	rootCmd.PersistentFlags().StringVar(&flagVault, "vault", "", "path to the Obsidian vault (overrides config file and env)")
 	rootCmd.PersistentFlags().StringVar(&flagTerminal, "terminal", "", "terminal emulator command (overrides config file and env)")
@@ -58,13 +65,28 @@ func main() {
 	}
 	spawnCmd.Flags().Bool("dry-run", false, "print intended actions without executing")
 
+	completeCmd := &cobra.Command{
+		Use:   "complete <task-id>",
+		Short: "Archive an active task, remove its worktree, update board/log",
+		Args:  cobra.ExactArgs(1),
+		RunE:  runComplete,
+	}
+
+	blockCmd := &cobra.Command{
+		Use:   "block <task-id>",
+		Short: "Move an active task to blocked with a one-line reason",
+		Args:  cobra.ExactArgs(1),
+		RunE:  runBlock,
+	}
+	blockCmd.Flags().String("reason", "", "one-line reason for blocking (required)")
+
 	configCmd := &cobra.Command{
 		Use:   "config",
 		Short: "Print the resolved config with source annotations",
 		RunE:  runConfig,
 	}
 
-	rootCmd.AddCommand(listCmd, spawnCmd, configCmd)
+	rootCmd.AddCommand(listCmd, spawnCmd, completeCmd, blockCmd, configCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -201,13 +223,7 @@ func runSpawn(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("reading vault: %w", err)
 	}
 
-	var target *task.Task
-	for i := range tasks {
-		if tasks[i].ID == taskID {
-			target = &tasks[i]
-			break
-		}
-	}
+	target := findTask(tasks, taskID)
 	if target == nil {
 		return fmt.Errorf("task %s not found in vault", taskID)
 	}
@@ -232,11 +248,74 @@ func runSpawn(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func runComplete(cmd *cobra.Command, args []string) error {
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+
+	taskID := args[0]
+	tasks, err := vault.ReadAll(cfg.Vault)
+	if err != nil {
+		return fmt.Errorf("reading vault: %w", err)
+	}
+	target := findTask(tasks, taskID)
+	if target == nil {
+		return fmt.Errorf("task %s not found in vault", taskID)
+	}
+
+	fmt.Printf("Completing %s...\n", taskID)
+	if err := dispatch.Complete(cfg, *target); err != nil {
+		return err
+	}
+	fmt.Printf("Done. %s archived; worktree removed.\n", taskID)
+	return nil
+}
+
+func runBlock(cmd *cobra.Command, args []string) error {
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+
+	taskID := args[0]
+	reason, _ := cmd.Flags().GetString("reason")
+	if reason == "" {
+		return fmt.Errorf("--reason is required")
+	}
+
+	tasks, err := vault.ReadAll(cfg.Vault)
+	if err != nil {
+		return fmt.Errorf("reading vault: %w", err)
+	}
+	target := findTask(tasks, taskID)
+	if target == nil {
+		return fmt.Errorf("task %s not found in vault", taskID)
+	}
+
+	fmt.Printf("Blocking %s...\n", taskID)
+	if err := dispatch.Block(cfg, *target, reason); err != nil {
+		return err
+	}
+	fmt.Printf("Done. %s moved to blocked/.\n", taskID)
+	return nil
+}
+
 func runConfig(cmd *cobra.Command, args []string) error {
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
 	}
 	fmt.Print(cfg.Format())
+	return nil
+}
+
+// findTask returns the first task with a matching ID, or nil.
+func findTask(tasks []task.Task, id string) *task.Task {
+	for i := range tasks {
+		if tasks[i].ID == id {
+			return &tasks[i]
+		}
+	}
 	return nil
 }

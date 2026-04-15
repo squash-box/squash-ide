@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/squashbox/squash-ide/internal/config"
 	"github.com/squashbox/squash-ide/internal/slug"
@@ -28,21 +29,12 @@ func Run(cfg config.Config, t task.Task) (Result, error) {
 
 	vaultRoot := vault.ExpandHome(cfg.Vault)
 
-	// Resolve repo path
-	repoPath := t.Repo
-	if repoPath == "" {
-		resolved, err := vault.ReadEntityRepo(cfg.Vault, t.Project)
-		if err != nil {
-			return Result{}, fmt.Errorf("resolving repo for project %s: %w", t.Project, err)
-		}
-		repoPath = resolved
-	} else {
-		repoPath = vault.ExpandHome(repoPath)
+	repoPath, err := resolveRepo(cfg, t)
+	if err != nil {
+		return Result{}, err
 	}
 
-	// Derive slug and branch
-	taskSlug := slug.FromTitle(t.Title)
-	branch := fmt.Sprintf("feat/%s-%s", t.ID, taskSlug)
+	branch := BranchFor(t)
 
 	// Create worktree
 	worktreePath, err := worktree.Create(repoPath, branch)
@@ -78,4 +70,90 @@ func Run(cfg config.Config, t task.Task) (Result, error) {
 	}
 
 	return Result{Branch: branch, WorktreePath: worktreePath}, nil
+}
+
+// Complete archives an active task: removes the worktree, moves the task
+// file from active/ to archive/, updates the board and log. The branch is
+// derived from the task title (same rule used by Run).
+func Complete(cfg config.Config, t task.Task) error {
+	if t.Status != "active" {
+		return fmt.Errorf("task %s has status %q — only active tasks can be completed", t.ID, t.Status)
+	}
+
+	vaultRoot := vault.ExpandHome(cfg.Vault)
+
+	repoPath, err := resolveRepo(cfg, t)
+	if err != nil {
+		return err
+	}
+
+	branch := BranchFor(t)
+
+	if err := worktree.Remove(repoPath, branch); err != nil {
+		return fmt.Errorf("removing worktree: %w", err)
+	}
+	if _, err := taskops.MoveToArchive(vaultRoot, t, branch, ""); err != nil {
+		return fmt.Errorf("archiving task: %w", err)
+	}
+	if err := taskops.UpdateBoardComplete(vaultRoot, t); err != nil {
+		return fmt.Errorf("updating board: %w", err)
+	}
+	if err := taskops.AppendLogComplete(vaultRoot, t, branch); err != nil {
+		return fmt.Errorf("appending to log: %w", err)
+	}
+	return nil
+}
+
+// Block moves an active task to the blocked/ directory with a one-line
+// reason, updates the board and log. The worktree is left in place so work
+// can resume after unblocking.
+func Block(cfg config.Config, t task.Task, reason string) error {
+	if t.Status != "active" {
+		return fmt.Errorf("task %s has status %q — only active tasks can be blocked", t.ID, t.Status)
+	}
+	if strings.TrimSpace(reason) == "" {
+		return fmt.Errorf("block reason required")
+	}
+
+	vaultRoot := vault.ExpandHome(cfg.Vault)
+
+	if _, err := taskops.MoveToBlocked(vaultRoot, t, reason); err != nil {
+		return fmt.Errorf("moving task to blocked: %w", err)
+	}
+	if err := taskops.UpdateBoardBlock(vaultRoot, t); err != nil {
+		return fmt.Errorf("updating board: %w", err)
+	}
+	if err := taskops.AppendLogBlock(vaultRoot, t, reason); err != nil {
+		return fmt.Errorf("appending to log: %w", err)
+	}
+	return nil
+}
+
+// BranchFor returns the conventional feature-branch name for a task.
+func BranchFor(t task.Task) string {
+	return fmt.Sprintf("feat/%s-%s", t.ID, slug.FromTitle(t.Title))
+}
+
+// WorktreePathFor resolves the repo for a task and returns the expected
+// worktree path (regardless of whether the worktree currently exists).
+// Useful for the TUI detail view on active tasks.
+func WorktreePathFor(cfg config.Config, t task.Task) (string, error) {
+	repoPath, err := resolveRepo(cfg, t)
+	if err != nil {
+		return "", err
+	}
+	return worktree.Path(repoPath, BranchFor(t)), nil
+}
+
+// resolveRepo returns the absolute repo path for a task: the task's repo
+// field takes precedence, falling back to the project's entity page.
+func resolveRepo(cfg config.Config, t task.Task) (string, error) {
+	if t.Repo != "" {
+		return vault.ExpandHome(t.Repo), nil
+	}
+	resolved, err := vault.ReadEntityRepo(cfg.Vault, t.Project)
+	if err != nil {
+		return "", fmt.Errorf("resolving repo for project %s: %w", t.Project, err)
+	}
+	return resolved, nil
 }

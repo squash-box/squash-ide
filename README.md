@@ -3,15 +3,33 @@
 Terminal task dispatcher for vault-based agentic workflows.
 
 Reads Obsidian-style task files (with YAML frontmatter) from a vault directory
-and provides a TUI dashboard and CLI subcommands. The `spawn` command creates
+and provides a TUI dashboard plus CLI subcommands. The `spawn` command creates
 git worktrees and launches Claude in tmux panes (or fresh OS terminal windows
-with `--no-tmux`) for task implementation.
+with `--no-tmux`); `complete` and `block` close the loop when work is done.
 
-## Build
+## Install
+
+**Quickest path** (requires Go 1.24+):
 
 ```bash
-go build ./cmd/squash-ide
+git clone https://github.com/squash-box/squash-ide.git
+cd squash-ide
+make install
 ```
+
+This builds `bin/squash-ide` and copies it to `~/.local/bin/squash-ide`. Make
+sure `~/.local/bin` is on your `$PATH`.
+
+Alternatives:
+
+```bash
+./scripts/install.sh                  # same as `make install`
+make install PREFIX=/usr/local        # system-wide install
+VERSION=v0.1.0 make install           # stamp a specific version into the binary
+```
+
+Plain `go build ./cmd/squash-ide` also works — it drops `squash-ide` in the
+current directory.
 
 ## Usage
 
@@ -20,7 +38,7 @@ go build ./cmd/squash-ide
 Launch the interactive terminal UI:
 
 ```bash
-./squash-ide
+squash-ide
 ```
 
 By default this **bootstraps a tmux session** named `squash-ide` and runs the
@@ -30,17 +48,27 @@ horizontal space equally. The TUI pane stays pinned at its configured width.
 Designed for ultra-wide monitors — one terminal window, many task panes.
 
 **Controls:**
-- `↑`/`↓` or `j`/`k` — navigate tasks
-- `Enter` — spawn the selected backlog task in a new pane to the right
-- `Tab` — open task detail pane
-- `Esc` — close detail pane / clear filter
-- `/` — filter tasks by ID or title
-- `r` — refresh vault data
-- `q` or `Ctrl+C` — quit the TUI (the tmux session keeps running)
+
+| Key         | Action                                      |
+|-------------|---------------------------------------------|
+| `↑` / `k`   | move up                                     |
+| `↓` / `j`   | move down                                   |
+| `Enter`     | spawn selected backlog task                 |
+| `c`         | complete selected active task               |
+| `b`         | block selected active task (prompts reason) |
+| `Tab`       | open task detail pane                       |
+| `Esc`       | close detail / cancel dialog / clear filter |
+| `/`         | filter tasks by ID or title                 |
+| `r`         | refresh vault                               |
+| `q` / `Ctrl+C` | quit the TUI (the tmux session keeps running) |
+
+Tasks are grouped by status (backlog, active, blocked). Active tasks are
+marked with a `●` indicator and their detail pane shows the resolved worktree
+path. The status bar shows the vault path and task counts.
 
 Spawned panes are normal tmux panes — close one with `Ctrl+B x` (default tmux
 prefix) and the rest re-tile on next spawn. Detach the whole session with
-`Ctrl+B d`; reattach by re-running `./squash-ide`.
+`Ctrl+B d`; reattach by re-running `squash-ide`.
 
 If `tmux` is not on `$PATH`, squash-ide prints a warning and falls back to
 the `--no-tmux` behaviour below.
@@ -50,17 +78,46 @@ the `--no-tmux` behaviour below.
 Create a git worktree and dispatch Claude into a new pane (or window):
 
 ```bash
-./squash-ide spawn T-008
+squash-ide spawn T-008
 ```
 
 This will:
-1. Resolve the task's target repo (from task `repo` field or project entity page)
-2. Create a git worktree on branch `feat/T-008-<slug>`
-3. Move the task from `backlog/` to `active/` and update frontmatter
-4. Update `tasks/board.md` and `wiki/log.md`
+1. Resolve the task's target repo (from the task `repo` field, or the project
+   entity page's `repo` field).
+2. Create a git worktree on branch `feat/T-008-<slug>` off `origin/main`.
+3. Move the task from `backlog/` to `active/` and update frontmatter.
+4. Update `tasks/board.md` and `wiki/log.md`.
 5. Open `claude '/implement T-008'` either as a new tmux pane (default, when
    the calling shell is inside a tmux session) or as a fresh OS terminal
-   window (auto-detected: ptyxis → gnome-terminal → x-terminal-emulator)
+   window (auto-detected: ptyxis → gnome-terminal → x-terminal-emulator).
+
+Preview what would happen without executing:
+
+```bash
+squash-ide spawn --dry-run T-008
+```
+
+### Complete an active task
+
+```bash
+squash-ide complete T-008
+```
+
+Removes the worktree, moves the task from `active/` to `archive/` (stamping
+`status: done` and `completed: <today>`), and records a "complete" entry in
+`wiki/log.md` plus a row under "Recently Completed" on the board.
+
+### Block an active task
+
+```bash
+squash-ide block T-008 --reason "waiting on upstream fix"
+```
+
+Moves the task from `active/` to `blocked/` (appending a `## Blocked` section
+with the reason to the task body), updates the board, and records a "block"
+entry in the log. The worktree is **not** removed — unblocking is a manual
+step: move the task back to `active/` and resume work in the existing
+worktree.
 
 ### Escape hatch — disable tmux
 
@@ -68,8 +125,8 @@ To go back to the v1 "one OS window per spawn" workflow (handy on systems
 without tmux, or if your window manager already tiles for you):
 
 ```bash
-./squash-ide --no-tmux
-./squash-ide --no-tmux spawn T-008
+squash-ide --no-tmux
+squash-ide --no-tmux spawn T-008
 ```
 
 You can also disable tmux permanently in your config file:
@@ -83,7 +140,7 @@ tmux:
 ### Tuning pane widths
 
 ```bash
-./squash-ide --tui-width 50 --min-pane-width 100
+squash-ide --tui-width 50 --min-pane-width 100
 ```
 
 Or in the config file:
@@ -100,53 +157,125 @@ If a new spawn would force any existing pane below `min_pane_width`, the
 spawn is rejected with a clear error rather than silently squeezing panes.
 Close some panes (`Ctrl+B x`) and try again.
 
-Preview what would happen without executing:
-
-```bash
-./squash-ide spawn --dry-run T-008
-```
-
 ### List tasks (JSON)
 
-Print all tasks from the vault as JSON:
-
 ```bash
-./squash-ide list
+squash-ide list
+squash-ide list --status backlog
 ```
 
-Filter by status:
+### Config
 
 ```bash
-./squash-ide list --status backlog
+squash-ide config
 ```
 
-### Custom vault path
+Prints the resolved configuration with the provenance of each field
+(default, config file, env var, or flag).
 
-By default, the vault path is `~/GIT/agentic/tasks/personal/`. Override with:
+Configuration is resolved in the order **default → config file → env vars →
+CLI flags**, with later sources overriding earlier ones.
 
-```bash
-./squash-ide --vault /path/to/vault spawn T-001
-./squash-ide --vault /path/to/vault
+Default config path: `$XDG_CONFIG_HOME/squash-ide/config.yaml` (usually
+`~/.config/squash-ide/config.yaml`).
+
+```yaml
+vault: ~/GIT/agentic/tasks/personal
+terminal:
+  command: ""      # empty = auto-detect ptyxis → gnome-terminal → x-terminal-emulator
+  args: ["--working-directory={cwd}", "--", "bash", "-c", "{exec}"]
+spawn:
+  command: claude
+  args: ["/implement {task_id}"]
+tmux:
+  enabled: true
+  session_name: squash-ide
+  tui_width: 60
+  min_pane_width: 80
 ```
+
+Environment variables (override file):
+
+| Var                | Effect                                 |
+|--------------------|----------------------------------------|
+| `SQUASH_VAULT`     | vault directory                        |
+| `SQUASH_TERMINAL`  | terminal emulator command              |
+| `SQUASH_SPAWN_CMD` | command to run inside spawned terminal |
+
+CLI flags (override env):
+
+| Flag                | Effect                              |
+|---------------------|-------------------------------------|
+| `--vault`           | vault directory                     |
+| `--terminal`        | terminal emulator command           |
+| `--spawn-cmd`       | command to run inside spawned terminal |
+| `--no-tmux`         | disable tmux tiled-pane mode        |
+| `--tui-width`       | fixed width (cols) for the TUI pane in tmux mode |
+| `--min-pane-width`  | minimum width per spawned tmux pane |
 
 ## Project Layout
 
 ```
-cmd/squash-ide/main.go         # CLI entry point (cobra + TUI + spawn + tmux bootstrap)
-internal/task/task.go           # Task struct
-internal/vault/vault.go         # Vault parser + entity page reader
-internal/ui/                    # Bubble Tea TUI (model, styles, keys)
-internal/slug/slug.go           # Branch-safe slug derivation from titles
-internal/worktree/worktree.go   # Git worktree creation (shells out to git)
-internal/spawner/spawner.go     # Dispatches to tmux pane or OS terminal window
-internal/tmux/                  # tmux CLI wrapper + pane-width tiling math
-internal/taskops/taskops.go     # Vault file mutations (move task, update board/log)
-internal/config/                # Config loader (defaults + file + env + flags)
-testdata/                       # Test fixture markdown files
+cmd/squash-ide/main.go           CLI entry point (cobra + TUI launcher + tmux bootstrap)
+internal/task/task.go            Task struct
+internal/vault/vault.go          Vault parser + entity page reader
+internal/ui/                     Bubble Tea TUI (model, keys, styles)
+internal/slug/slug.go            Branch-safe slug derivation from titles
+internal/worktree/worktree.go    Git worktree create/remove wrapper
+internal/spawner/spawner.go      Dispatches to tmux pane or OS terminal window
+internal/tmux/                   tmux CLI wrapper + pane-width tiling math
+internal/taskops/taskops.go      Vault file mutations (move task, update board/log)
+internal/dispatch/dispatch.go    Orchestration: Run / Complete / Block
+internal/config/                 Config loading + templating
+Makefile                         build / install / test / dist
+scripts/install.sh               Standalone installer
+testdata/                        Test fixture markdown files
 ```
 
-## Test
+## Development
 
 ```bash
-go test ./...
+make test       # go test ./...
+make vet        # go vet ./...
+make fmt        # gofmt -w .
+make build      # ./bin/squash-ide
+make clean      # rm -rf bin dist
+```
+
+## Troubleshooting
+
+**`vault path ... does not exist`** — the resolved vault path isn't a
+directory. Check `squash-ide config` to see which source (default, file, env,
+flag) is providing the path and fix whichever layer is wrong.
+
+**`task ... not found in vault`** — the task ID isn't present in
+`tasks/{backlog,active,blocked,archive}/`. Verify the task file exists and
+the file's YAML `id` field matches what you passed. `squash-ide list` prints
+every task the reader can see.
+
+**`entity page ... has no repo field`** — `spawn`, `complete`, and the TUI
+worktree-path display resolve the repo from the task's `repo` field, falling
+back to `wiki/entities/<project>.md`'s `repo` field. Set one of them.
+
+**`terminal ... not found on PATH`** — the configured terminal emulator isn't
+on `$PATH`. Either install it or leave `terminal.command` empty to let the
+spawner auto-detect one (`ptyxis`, `gnome-terminal`, `x-terminal-emulator`).
+
+**`warning: tmux not on PATH; falling back to OS-window spawn`** — either
+install tmux or pass `--no-tmux` (or set `tmux.enabled: false` in the config
+file) to silence the warning.
+
+**A stale worktree lingers after `complete`** — if the worktree directory
+contained uncommitted files, `git worktree remove` falls back to `--force`.
+If that also fails (rare), remove manually: `git worktree remove --force
+<path>` then `git branch -D <branch>`.
+
+## Release
+
+`v0.1.0` is the first tagged release. To cut a new one:
+
+```bash
+git tag -a v0.1.0 -m "v0.1.0"
+git push origin v0.1.0
+make dist VERSION=v0.1.0   # produces dist/squash-ide-v0.1.0-<os>-<arch>.tar.gz
 ```

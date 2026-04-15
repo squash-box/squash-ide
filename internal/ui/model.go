@@ -22,6 +22,10 @@ const (
 	detailView
 )
 
+// activeIndicator is the glyph used to mark active tasks in the list
+// and detail view.
+const activeIndicator = "●"
+
 // displayItem is either a status header or a task row in the list.
 type displayItem struct {
 	isHeader bool
@@ -34,10 +38,10 @@ type Model struct {
 	cfg       config.Config
 	vaultPath string // cfg.Vault — cached for rendering
 
-	allTasks []task.Task    // all loaded tasks
-	items    []displayItem  // grouped display items (headers + tasks)
-	filtered []displayItem  // items after filter applied
-	cursor   int            // index into filtered
+	allTasks []task.Task   // all loaded tasks
+	items    []displayItem // grouped display items (headers + tasks)
+	filtered []displayItem // items after filter applied
+	cursor   int           // index into filtered
 
 	filter       string
 	filterActive bool
@@ -50,9 +54,12 @@ type Model struct {
 
 	err error
 
-	// Dispatch state
-	confirming  *task.Task // non-nil when confirmation dialog is showing
-	dispatching bool       // true while dispatch is in progress
+	// Dispatch / cleanup state
+	confirming  *task.Task // non-nil when spawn confirmation dialog is showing
+	completing  *task.Task // non-nil when complete confirmation dialog is showing
+	blocking    *task.Task // non-nil when block-reason input is active
+	blockReason string     // current text buffer for the block reason
+	dispatching bool       // true while an async op is in progress
 	statusMsg   string     // transient message for status bar
 	statusIsErr bool       // whether statusMsg is an error
 }
@@ -84,6 +91,14 @@ type dispatchErrMsg struct {
 	err error
 }
 
+type completeDoneMsg struct {
+	taskID string
+}
+
+type blockDoneMsg struct {
+	taskID string
+}
+
 func (m Model) loadTasks() tea.Msg {
 	tasks, err := vault.ReadAll(m.vaultPath)
 	return tasksLoadedMsg{tasks: tasks, err: err}
@@ -97,6 +112,26 @@ func (m Model) runDispatch(t task.Task) tea.Cmd {
 			return dispatchErrMsg{err: err}
 		}
 		return dispatchDoneMsg{taskID: t.ID, branch: res.Branch}
+	}
+}
+
+func (m Model) runComplete(t task.Task) tea.Cmd {
+	cfg := m.cfg
+	return func() tea.Msg {
+		if err := dispatch.Complete(cfg, t); err != nil {
+			return dispatchErrMsg{err: err}
+		}
+		return completeDoneMsg{taskID: t.ID}
+	}
+}
+
+func (m Model) runBlock(t task.Task, reason string) tea.Cmd {
+	cfg := m.cfg
+	return func() tea.Msg {
+		if err := dispatch.Block(cfg, t, reason); err != nil {
+			return dispatchErrMsg{err: err}
+		}
+		return blockDoneMsg{taskID: t.ID}
 	}
 }
 
@@ -129,6 +164,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusIsErr = false
 		return m, m.loadTasks
 
+	case completeDoneMsg:
+		m.dispatching = false
+		m.statusMsg = fmt.Sprintf("completed %s", msg.taskID)
+		m.statusIsErr = false
+		return m, m.loadTasks
+
+	case blockDoneMsg:
+		m.dispatching = false
+		m.statusMsg = fmt.Sprintf("blocked %s", msg.taskID)
+		m.statusIsErr = false
+		return m, m.loadTasks
+
 	case dispatchErrMsg:
 		m.dispatching = false
 		m.statusMsg = msg.err.Error()
@@ -142,7 +189,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// Confirmation dialog
+	// Block reason input
+	if m.blocking != nil {
+		return m.handleBlockInputKey(msg)
+	}
+
+	// Complete confirmation dialog
+	if m.completing != nil {
+		return m.handleCompleteConfirmKey(msg)
+	}
+
+	// Spawn confirmation dialog
 	if m.confirming != nil {
 		return m.handleConfirmKey(msg)
 	}
@@ -172,6 +229,57 @@ func (m Model) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.runDispatch(t)
 	case key.Matches(msg, keys.Deny), key.Matches(msg, keys.Back):
 		m.confirming = nil
+		return m, nil
+	}
+	return m, nil
+}
+
+func (m Model) handleCompleteConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case key.Matches(msg, keys.Confirm), key.Matches(msg, keys.Enter):
+		t := *m.completing
+		m.completing = nil
+		m.dispatching = true
+		m.statusMsg = fmt.Sprintf("completing %s...", t.ID)
+		m.statusIsErr = false
+		return m, m.runComplete(t)
+	case key.Matches(msg, keys.Deny), key.Matches(msg, keys.Back):
+		m.completing = nil
+		return m, nil
+	}
+	return m, nil
+}
+
+func (m Model) handleBlockInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case key.Matches(msg, keys.Back):
+		m.blocking = nil
+		m.blockReason = ""
+		return m, nil
+	case msg.Type == tea.KeyEnter:
+		if strings.TrimSpace(m.blockReason) == "" {
+			m.statusMsg = "block reason cannot be empty"
+			m.statusIsErr = true
+			return m, nil
+		}
+		t := *m.blocking
+		reason := m.blockReason
+		m.blocking = nil
+		m.blockReason = ""
+		m.dispatching = true
+		m.statusMsg = fmt.Sprintf("blocking %s...", t.ID)
+		m.statusIsErr = false
+		return m, m.runBlock(t, reason)
+	case msg.Type == tea.KeyBackspace:
+		if len(m.blockReason) > 0 {
+			m.blockReason = m.blockReason[:len(m.blockReason)-1]
+		}
+		return m, nil
+	case msg.Type == tea.KeyRunes:
+		m.blockReason += string(msg.Runes)
+		return m, nil
+	case msg.Type == tea.KeySpace:
+		m.blockReason += " "
 		return m, nil
 	}
 	return m, nil
@@ -242,6 +350,41 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.statusMsg = fmt.Sprintf("%s is already %s", item.task.ID, item.task.Status)
 				m.statusIsErr = false
 			}
+		}
+
+	case key.Matches(msg, keys.Complete):
+		if item := m.selectedItem(); item != nil && !item.isHeader {
+			if item.task.Status != "active" {
+				m.statusMsg = fmt.Sprintf("%s is %s — only active tasks can be completed",
+					item.task.ID, item.task.Status)
+				m.statusIsErr = true
+				return m, nil
+			}
+			if m.dispatching {
+				m.statusMsg = "another operation is in progress"
+				m.statusIsErr = true
+				return m, nil
+			}
+			t := item.task
+			m.completing = &t
+		}
+
+	case key.Matches(msg, keys.Block):
+		if item := m.selectedItem(); item != nil && !item.isHeader {
+			if item.task.Status != "active" {
+				m.statusMsg = fmt.Sprintf("%s is %s — only active tasks can be blocked",
+					item.task.ID, item.task.Status)
+				m.statusIsErr = true
+				return m, nil
+			}
+			if m.dispatching {
+				m.statusMsg = "another operation is in progress"
+				m.statusIsErr = true
+				return m, nil
+			}
+			t := item.task
+			m.blocking = &t
+			m.blockReason = ""
 		}
 
 	case key.Matches(msg, keys.Detail):
@@ -352,11 +495,25 @@ func (m *Model) updateDetailContent() {
 		return
 	}
 	t := item.task
-	header := detailTitleStyle.Render(fmt.Sprintf("%s — %s", t.ID, t.Title))
+
+	title := fmt.Sprintf("%s — %s", t.ID, t.Title)
+	if t.Status == "active" {
+		title = activeIndicatorStyle.Render(activeIndicator) + " " + title
+	}
+	header := detailTitleStyle.Render(title)
+
 	meta := fmt.Sprintf("  Type: %s  Project: %s  Status: %s  Priority: %s",
 		t.Type, t.Project, t.Status, t.Priority)
+
+	var extra string
+	if t.Status == "active" {
+		if wt, err := dispatch.WorktreePathFor(m.cfg, t); err == nil {
+			extra = "\n" + worktreeStyle.Render("Worktree: "+wt)
+		}
+	}
+
 	body := detailBodyStyle.Render(t.Body)
-	content := header + "\n" + meta + "\n\n" + body
+	content := header + "\n" + meta + extra + "\n\n" + body
 
 	m.viewport.SetContent(content)
 	m.viewport.GotoTop()
@@ -421,10 +578,18 @@ func (m Model) listViewRender() string {
 		rendered++
 	}
 
-	// Confirmation dialog overlay
+	// Dialog overlays
 	if m.confirming != nil {
 		b.WriteString(confirmBoxStyle.Render(
 			fmt.Sprintf("Spawn %s? [y/N]", m.confirming.ID)))
+		b.WriteString("\n")
+	} else if m.completing != nil {
+		b.WriteString(confirmBoxStyle.Render(
+			fmt.Sprintf("Complete %s? [y/N]", m.completing.ID)))
+		b.WriteString("\n")
+	} else if m.blocking != nil {
+		prompt := fmt.Sprintf("Block %s — reason: %s█", m.blocking.ID, m.blockReason)
+		b.WriteString(inputBoxStyle.Render(prompt))
 		b.WriteString("\n")
 	}
 
@@ -443,12 +608,15 @@ func (m Model) listViewRender() string {
 	b.WriteString("\n")
 
 	// Help
-	if m.confirming != nil {
+	switch {
+	case m.confirming != nil, m.completing != nil:
 		b.WriteString(helpStyle.Render("[y/enter] confirm  [n/esc] cancel"))
-	} else if m.filterActive {
+	case m.blocking != nil:
+		b.WriteString(helpStyle.Render("[enter] submit  [esc] cancel  [type] reason"))
+	case m.filterActive:
 		b.WriteString(helpStyle.Render("[enter] apply  [esc] clear  [type] filter"))
-	} else {
-		b.WriteString(helpStyle.Render("[↑↓/jk] navigate  [enter] spawn  [tab] detail  [/] filter  [r] refresh  [q] quit"))
+	default:
+		b.WriteString(helpStyle.Render("[↑↓/jk] nav  [enter] spawn  [c] complete  [b] block  [tab] detail  [/] filter  [r] refresh  [q] quit"))
 	}
 	b.WriteString("\n")
 
@@ -490,5 +658,11 @@ func formatTaskLine(t task.Task) string {
 	typ := typeStyle.Render(fmt.Sprintf("[%s]", t.Type))
 	title := t.Title
 	proj := projectStyle.Render(t.Project)
-	return lipgloss.JoinHorizontal(lipgloss.Top, id, " ", typ, " ", title, " ", proj)
+
+	indicator := " "
+	if t.Status == "active" {
+		indicator = activeIndicatorStyle.Render(activeIndicator)
+	}
+
+	return lipgloss.JoinHorizontal(lipgloss.Top, indicator, " ", id, " ", typ, " ", title, " ", proj)
 }
