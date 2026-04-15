@@ -57,4 +57,23 @@ var (
 
 	projectStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("109"))
+
+	confirmBoxStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("205")).
+			Padding(0, 2).
+			Bold(true)
+
+	statusSuccessStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("78")).
+				PaddingLeft(1)
+
+	statusErrorStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("196")).
+				PaddingLeft(1)
+
+	dispatchingStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("229")).
+				PaddingLeft(1).
+				Bold(true)
 )
