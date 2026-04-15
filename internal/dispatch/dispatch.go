@@ -3,6 +3,7 @@ package dispatch
 import (
 	"fmt"
 
+	"github.com/squashbox/squash-ide/internal/config"
 	"github.com/squashbox/squash-ide/internal/slug"
 	"github.com/squashbox/squash-ide/internal/spawner"
 	"github.com/squashbox/squash-ide/internal/task"
@@ -18,19 +19,19 @@ type Result struct {
 }
 
 // Run executes the full spawn workflow for a task: create worktree, move task
-// to active, update board, append log, and spawn a terminal.
-// vaultPath may contain ~ (it will be expanded).
-func Run(vaultPath string, t task.Task) (Result, error) {
+// to active, update board, append log, and spawn a terminal using the
+// configured terminal + spawn command (with templating).
+func Run(cfg config.Config, t task.Task) (Result, error) {
 	if t.Status != "backlog" {
 		return Result{}, fmt.Errorf("task %s has status %q — only backlog tasks can be spawned", t.ID, t.Status)
 	}
 
-	vaultRoot := vault.ExpandHome(vaultPath)
+	vaultRoot := vault.ExpandHome(cfg.Vault)
 
 	// Resolve repo path
 	repoPath := t.Repo
 	if repoPath == "" {
-		resolved, err := vault.ReadEntityRepo(vaultPath, t.Project)
+		resolved, err := vault.ReadEntityRepo(cfg.Vault, t.Project)
 		if err != nil {
 			return Result{}, fmt.Errorf("resolving repo for project %s: %w", t.Project, err)
 		}
@@ -65,7 +66,14 @@ func Run(vaultPath string, t task.Task) (Result, error) {
 	}
 
 	// Spawn terminal
-	if err := spawner.Spawn(worktreePath, t.ID); err != nil {
+	vars := map[string]string{
+		"cwd":      worktreePath,
+		"task_id":  t.ID,
+		"worktree": worktreePath,
+		"repo":     repoPath,
+		"branch":   branch,
+	}
+	if err := spawner.SpawnWith(cfg, vars); err != nil {
 		return Result{}, fmt.Errorf("spawning terminal: %w", err)
 	}
 

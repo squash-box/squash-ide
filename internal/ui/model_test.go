@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/squashbox/squash-ide/internal/config"
 	"github.com/squashbox/squash-ide/internal/task"
 )
 
@@ -19,7 +20,9 @@ func testTasks() []task.Task {
 }
 
 func modelWithTasks(tasks []task.Task) Model {
-	m := New("/fake/vault")
+	cfg := config.Defaults()
+	cfg.Vault = "/fake/vault"
+	m := New(cfg)
 	m.allTasks = tasks
 	m.width = 80
 	m.height = 24

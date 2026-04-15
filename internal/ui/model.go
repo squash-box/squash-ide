@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/squashbox/squash-ide/internal/config"
 	"github.com/squashbox/squash-ide/internal/dispatch"
 	"github.com/squashbox/squash-ide/internal/task"
 	"github.com/squashbox/squash-ide/internal/vault"
@@ -30,7 +31,8 @@ type displayItem struct {
 
 // Model is the top-level Bubble Tea model.
 type Model struct {
-	vaultPath string
+	cfg       config.Config
+	vaultPath string // cfg.Vault — cached for rendering
 
 	allTasks []task.Task    // all loaded tasks
 	items    []displayItem  // grouped display items (headers + tasks)
@@ -55,10 +57,11 @@ type Model struct {
 	statusIsErr bool       // whether statusMsg is an error
 }
 
-// New creates a new Model for the given vault path.
-func New(vaultPath string) Model {
+// New creates a new Model from the resolved config.
+func New(cfg config.Config) Model {
 	return Model{
-		vaultPath: vaultPath,
+		cfg:       cfg,
+		vaultPath: cfg.Vault,
 	}
 }
 
@@ -87,9 +90,9 @@ func (m Model) loadTasks() tea.Msg {
 }
 
 func (m Model) runDispatch(t task.Task) tea.Cmd {
-	vaultPath := m.vaultPath
+	cfg := m.cfg
 	return func() tea.Msg {
-		res, err := dispatch.Run(vaultPath, t)
+		res, err := dispatch.Run(cfg, t)
 		if err != nil {
 			return dispatchErrMsg{err: err}
 		}
