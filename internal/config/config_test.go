@@ -363,6 +363,111 @@ func TestBuildExec_Quoting(t *testing.T) {
 	}
 }
 
+func TestTmuxDefaults(t *testing.T) {
+	d := Defaults()
+	if !d.Tmux.Enabled {
+		t.Error("tmux.enabled default should be true")
+	}
+	if d.Tmux.SessionName != "squash-ide" {
+		t.Errorf("tmux.session_name default = %q, want squash-ide", d.Tmux.SessionName)
+	}
+	if d.Tmux.TUIWidth != 60 {
+		t.Errorf("tmux.tui_width default = %d, want 60", d.Tmux.TUIWidth)
+	}
+	if d.Tmux.MinPaneWidth != 80 {
+		t.Errorf("tmux.min_pane_width default = %d, want 80", d.Tmux.MinPaneWidth)
+	}
+	for _, key := range []string{"tmux.enabled", "tmux.session_name", "tmux.tui_width", "tmux.min_pane_width"} {
+		if got := d.Sources[key]; got != SourceDefault {
+			t.Errorf("Sources[%q] = %q, want default", key, got)
+		}
+	}
+}
+
+func TestLoad_TmuxFromFile(t *testing.T) {
+	clearSquashEnv(t)
+	path := writeConfig(t, `tmux:
+  enabled: false
+  session_name: my-session
+  tui_width: 50
+  min_pane_width: 100
+`)
+	cfg, err := Load(Overrides{ConfigPath: path})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Tmux.Enabled {
+		t.Error("tmux.enabled = true, want false (from file)")
+	}
+	if cfg.Sources["tmux.enabled"] != SourceFile {
+		t.Errorf("tmux.enabled source = %q, want file", cfg.Sources["tmux.enabled"])
+	}
+	if cfg.Tmux.SessionName != "my-session" {
+		t.Errorf("tmux.session_name = %q, want my-session", cfg.Tmux.SessionName)
+	}
+	if cfg.Tmux.TUIWidth != 50 {
+		t.Errorf("tmux.tui_width = %d, want 50", cfg.Tmux.TUIWidth)
+	}
+	if cfg.Tmux.MinPaneWidth != 100 {
+		t.Errorf("tmux.min_pane_width = %d, want 100", cfg.Tmux.MinPaneWidth)
+	}
+}
+
+func TestLoad_TmuxFlagOverrides(t *testing.T) {
+	clearSquashEnv(t)
+	path := writeConfig(t, `tmux:
+  tui_width: 50
+  min_pane_width: 100
+`)
+	cfg, err := Load(Overrides{
+		ConfigPath:   path,
+		NoTmux:       true,
+		TUIWidth:     40,
+		MinPaneWidth: 120,
+	})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Tmux.Enabled {
+		t.Error("--no-tmux should set Enabled=false")
+	}
+	if cfg.Sources["tmux.enabled"] != SourceFlag {
+		t.Errorf("tmux.enabled source = %q, want flag", cfg.Sources["tmux.enabled"])
+	}
+	if cfg.Tmux.TUIWidth != 40 {
+		t.Errorf("tmux.tui_width = %d, want 40 (flag)", cfg.Tmux.TUIWidth)
+	}
+	if cfg.Sources["tmux.tui_width"] != SourceFlag {
+		t.Errorf("tmux.tui_width source = %q, want flag", cfg.Sources["tmux.tui_width"])
+	}
+	if cfg.Tmux.MinPaneWidth != 120 {
+		t.Errorf("tmux.min_pane_width = %d, want 120 (flag)", cfg.Tmux.MinPaneWidth)
+	}
+}
+
+func TestLoad_TmuxOmitInFileKeepsDefault(t *testing.T) {
+	clearSquashEnv(t)
+	// File mentions other things but not tmux at all.
+	path := writeConfig(t, `vault: /tmp/v
+spawn:
+  command: aider
+`)
+	cfg, err := Load(Overrides{ConfigPath: path})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	d := Defaults()
+	if cfg.Tmux.Enabled != d.Tmux.Enabled {
+		t.Errorf("tmux.enabled = %t, want default %t", cfg.Tmux.Enabled, d.Tmux.Enabled)
+	}
+	if cfg.Sources["tmux.enabled"] != SourceDefault {
+		t.Errorf("source = %q, want default", cfg.Sources["tmux.enabled"])
+	}
+	if cfg.Tmux.TUIWidth != d.Tmux.TUIWidth {
+		t.Errorf("tmux.tui_width = %d, want default %d", cfg.Tmux.TUIWidth, d.Tmux.TUIWidth)
+	}
+}
+
 func TestPrecedence_PerFieldIndependently(t *testing.T) {
 	// Vault from flag, terminal from env, spawn from file, terminal.args default.
 	clearSquashEnv(t)
