@@ -41,15 +41,27 @@ type Spawn struct {
 	Args    []string `yaml:"args"`
 }
 
+// Tmux controls the v2 single-terminal tiled-pane workflow (T-011).
+// When Enabled, squash-ide bootstraps a tmux session and opens spawned tasks
+// as new panes to the right of the TUI instead of new OS terminal windows.
+type Tmux struct {
+	Enabled      bool   `yaml:"enabled"`
+	SessionName  string `yaml:"session_name"`
+	TUIWidth     int    `yaml:"tui_width"`
+	MinPaneWidth int    `yaml:"min_pane_width"`
+}
+
 // Config is the resolved squash-ide configuration.
 type Config struct {
 	Vault    string   `yaml:"vault"`
 	Terminal Terminal `yaml:"terminal"`
 	Spawn    Spawn    `yaml:"spawn"`
+	Tmux     Tmux     `yaml:"tmux"`
 
 	// Sources records the provenance of each resolved field.
 	// Keys: "vault", "terminal.command", "terminal.args",
-	// "spawn.command", "spawn.args".
+	// "spawn.command", "spawn.args",
+	// "tmux.enabled", "tmux.session_name", "tmux.tui_width", "tmux.min_pane_width".
 	Sources map[string]Source `yaml:"-"`
 
 	// Path is the resolved path to the config file, if one was loaded.
@@ -62,6 +74,12 @@ type Overrides struct {
 	Vault    string
 	Terminal string
 	SpawnCmd string
+
+	// Tmux flag overrides. --no-tmux is presence-only: true forces tmux off,
+	// absence (false) is a no-op (config/env still wins).
+	NoTmux       bool
+	TUIWidth     int // 0 => not provided
+	MinPaneWidth int // 0 => not provided
 
 	// ConfigPath, when non-empty, overrides the default ~/.config/squash-ide/config.yaml
 	// lookup. Useful for tests.
@@ -82,12 +100,22 @@ func Defaults() Config {
 			Command: "claude",
 			Args:    []string{"/implement {task_id}"},
 		},
+		Tmux: Tmux{
+			Enabled:      true,
+			SessionName:  "squash-ide",
+			TUIWidth:     60,
+			MinPaneWidth: 80,
+		},
 		Sources: map[string]Source{
-			"vault":            SourceDefault,
-			"terminal.command": SourceDefault,
-			"terminal.args":    SourceDefault,
-			"spawn.command":    SourceDefault,
-			"spawn.args":       SourceDefault,
+			"vault":               SourceDefault,
+			"terminal.command":    SourceDefault,
+			"terminal.args":       SourceDefault,
+			"spawn.command":       SourceDefault,
+			"spawn.args":          SourceDefault,
+			"tmux.enabled":        SourceDefault,
+			"tmux.session_name":   SourceDefault,
+			"tmux.tui_width":      SourceDefault,
+			"tmux.min_pane_width": SourceDefault,
 		},
 	}
 }
@@ -127,6 +155,24 @@ func Load(ov Overrides) (Config, error) {
 	return cfg, nil
 }
 
+// fileTmux mirrors Tmux but uses *bool so we can tell "user omitted the field"
+// (nil) from "user wrote enabled: false" (non-nil pointing at false).
+type fileTmux struct {
+	Enabled      *bool  `yaml:"enabled"`
+	SessionName  string `yaml:"session_name"`
+	TUIWidth     int    `yaml:"tui_width"`
+	MinPaneWidth int    `yaml:"min_pane_width"`
+}
+
+// fileConfig is the parse-only shape of the YAML file. It mirrors Config
+// but uses pointers / sentinel zeros where needed for presence detection.
+type fileConfig struct {
+	Vault    string    `yaml:"vault"`
+	Terminal Terminal  `yaml:"terminal"`
+	Spawn    Spawn     `yaml:"spawn"`
+	Tmux     *fileTmux `yaml:"tmux"`
+}
+
 // applyFile reads the YAML config at path (if it exists) and overlays its
 // non-zero fields onto cfg. A missing file is silently ignored.
 func applyFile(cfg *Config, path string) error {
@@ -138,31 +184,49 @@ func applyFile(cfg *Config, path string) error {
 		return fmt.Errorf("reading config %s: %w", path, err)
 	}
 
-	var fileCfg Config
-	if err := yaml.Unmarshal(data, &fileCfg); err != nil {
+	var fc fileConfig
+	if err := yaml.Unmarshal(data, &fc); err != nil {
 		return fmt.Errorf("parsing config %s: %w", path, err)
 	}
 
 	cfg.Path = path
-	if fileCfg.Vault != "" {
-		cfg.Vault = fileCfg.Vault
+	if fc.Vault != "" {
+		cfg.Vault = fc.Vault
 		cfg.Sources["vault"] = SourceFile
 	}
-	if fileCfg.Terminal.Command != "" {
-		cfg.Terminal.Command = fileCfg.Terminal.Command
+	if fc.Terminal.Command != "" {
+		cfg.Terminal.Command = fc.Terminal.Command
 		cfg.Sources["terminal.command"] = SourceFile
 	}
-	if fileCfg.Terminal.Args != nil {
-		cfg.Terminal.Args = fileCfg.Terminal.Args
+	if fc.Terminal.Args != nil {
+		cfg.Terminal.Args = fc.Terminal.Args
 		cfg.Sources["terminal.args"] = SourceFile
 	}
-	if fileCfg.Spawn.Command != "" {
-		cfg.Spawn.Command = fileCfg.Spawn.Command
+	if fc.Spawn.Command != "" {
+		cfg.Spawn.Command = fc.Spawn.Command
 		cfg.Sources["spawn.command"] = SourceFile
 	}
-	if fileCfg.Spawn.Args != nil {
-		cfg.Spawn.Args = fileCfg.Spawn.Args
+	if fc.Spawn.Args != nil {
+		cfg.Spawn.Args = fc.Spawn.Args
 		cfg.Sources["spawn.args"] = SourceFile
+	}
+	if fc.Tmux != nil {
+		if fc.Tmux.Enabled != nil {
+			cfg.Tmux.Enabled = *fc.Tmux.Enabled
+			cfg.Sources["tmux.enabled"] = SourceFile
+		}
+		if fc.Tmux.SessionName != "" {
+			cfg.Tmux.SessionName = fc.Tmux.SessionName
+			cfg.Sources["tmux.session_name"] = SourceFile
+		}
+		if fc.Tmux.TUIWidth > 0 {
+			cfg.Tmux.TUIWidth = fc.Tmux.TUIWidth
+			cfg.Sources["tmux.tui_width"] = SourceFile
+		}
+		if fc.Tmux.MinPaneWidth > 0 {
+			cfg.Tmux.MinPaneWidth = fc.Tmux.MinPaneWidth
+			cfg.Sources["tmux.min_pane_width"] = SourceFile
+		}
 	}
 	return nil
 }
@@ -196,6 +260,20 @@ func applyOverrides(cfg *Config, ov Overrides) {
 	if ov.SpawnCmd != "" {
 		cfg.Spawn.Command = ov.SpawnCmd
 		cfg.Sources["spawn.command"] = SourceFlag
+	}
+	// --no-tmux is the only way to disable tmux from the CLI; absence of
+	// the flag never re-enables it (config/env still wins).
+	if ov.NoTmux {
+		cfg.Tmux.Enabled = false
+		cfg.Sources["tmux.enabled"] = SourceFlag
+	}
+	if ov.TUIWidth > 0 {
+		cfg.Tmux.TUIWidth = ov.TUIWidth
+		cfg.Sources["tmux.tui_width"] = SourceFlag
+	}
+	if ov.MinPaneWidth > 0 {
+		cfg.Tmux.MinPaneWidth = ov.MinPaneWidth
+		cfg.Sources["tmux.min_pane_width"] = SourceFlag
 	}
 }
 
@@ -234,6 +312,10 @@ func (c Config) Format() string {
 	fmt.Fprintf(&b, "terminal.args: %v (from %s)\n", c.Terminal.Args, source(c, "terminal.args"))
 	fmt.Fprintf(&b, "spawn.command: %s (from %s)\n", c.Spawn.Command, source(c, "spawn.command"))
 	fmt.Fprintf(&b, "spawn.args: %v (from %s)\n", c.Spawn.Args, source(c, "spawn.args"))
+	fmt.Fprintf(&b, "tmux.enabled: %t (from %s)\n", c.Tmux.Enabled, source(c, "tmux.enabled"))
+	fmt.Fprintf(&b, "tmux.session_name: %s (from %s)\n", c.Tmux.SessionName, source(c, "tmux.session_name"))
+	fmt.Fprintf(&b, "tmux.tui_width: %d (from %s)\n", c.Tmux.TUIWidth, source(c, "tmux.tui_width"))
+	fmt.Fprintf(&b, "tmux.min_pane_width: %d (from %s)\n", c.Tmux.MinPaneWidth, source(c, "tmux.min_pane_width"))
 	return b.String()
 }
 

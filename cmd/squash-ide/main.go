@@ -4,21 +4,27 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 	"github.com/squashbox/squash-ide/internal/config"
 	"github.com/squashbox/squash-ide/internal/dispatch"
 	"github.com/squashbox/squash-ide/internal/task"
+	"github.com/squashbox/squash-ide/internal/tmux"
 	"github.com/squashbox/squash-ide/internal/ui"
 	"github.com/squashbox/squash-ide/internal/vault"
 )
 
 // Flag values, populated by cobra before RunE runs. Empty string = not set.
 var (
-	flagVault    string
-	flagTerminal string
-	flagSpawnCmd string
+	flagVault        string
+	flagTerminal     string
+	flagSpawnCmd     string
+	flagNoTmux       bool
+	flagInTmux       bool // internal: marks "we already wrapped ourselves in tmux"
+	flagTUIWidth     int
+	flagMinPaneWidth int
 )
 
 func main() {
@@ -31,6 +37,11 @@ func main() {
 	rootCmd.PersistentFlags().StringVar(&flagVault, "vault", "", "path to the Obsidian vault (overrides config file and env)")
 	rootCmd.PersistentFlags().StringVar(&flagTerminal, "terminal", "", "terminal emulator command (overrides config file and env)")
 	rootCmd.PersistentFlags().StringVar(&flagSpawnCmd, "spawn-cmd", "", "command to run inside spawned terminal (overrides config file and env)")
+	rootCmd.PersistentFlags().BoolVar(&flagNoTmux, "no-tmux", false, "disable tmux tiled-pane mode; spawn each task in its own OS terminal window")
+	rootCmd.PersistentFlags().BoolVar(&flagInTmux, "in-tmux", false, "internal: indicates the process is running inside its own bootstrapped tmux session")
+	_ = rootCmd.PersistentFlags().MarkHidden("in-tmux")
+	rootCmd.PersistentFlags().IntVar(&flagTUIWidth, "tui-width", 0, "fixed width (cols) for the TUI pane in tmux mode (default 60)")
+	rootCmd.PersistentFlags().IntVar(&flagMinPaneWidth, "min-pane-width", 0, "minimum width (cols) per spawned tmux pane; spawn is rejected if violated (default 80)")
 
 	listCmd := &cobra.Command{
 		Use:   "list",
@@ -63,9 +74,12 @@ func main() {
 // loadConfig resolves the config, applying CLI flags on top of env and file.
 func loadConfig() (config.Config, error) {
 	return config.Load(config.Overrides{
-		Vault:    flagVault,
-		Terminal: flagTerminal,
-		SpawnCmd: flagSpawnCmd,
+		Vault:        flagVault,
+		Terminal:     flagTerminal,
+		SpawnCmd:     flagSpawnCmd,
+		NoTmux:       flagNoTmux,
+		TUIWidth:     flagTUIWidth,
+		MinPaneWidth: flagMinPaneWidth,
 	})
 }
 
@@ -74,10 +88,73 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	// T-011: if tmux mode is enabled and we're not already inside tmux,
+	// re-exec ourselves inside a tmux session. tmux.EnsureSession replaces
+	// the current process via syscall.Exec on success — it only returns on
+	// error. We pass --in-tmux explicitly so the inner process is an
+	// observable signal that we wrapped it (and as a belt-and-suspenders
+	// guard against any future bug that misreads $TMUX).
+	if cfg.Tmux.Enabled && !flagInTmux && !tmux.InSession() {
+		if !tmux.Available() {
+			fmt.Fprintln(os.Stderr, "warning: tmux not on PATH; falling back to OS-window spawn (use --no-tmux to silence)")
+		} else {
+			inner := buildSelfInvocation()
+			// Replaces this process. Only returns on exec failure.
+			if err := tmux.EnsureSession(cfg.Tmux.SessionName, inner); err != nil {
+				return fmt.Errorf("bootstrapping tmux session: %w", err)
+			}
+		}
+	}
+
 	m := ui.New(cfg)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	_, err = p.Run()
 	return err
+}
+
+// buildSelfInvocation reconstructs the command line that the tmux pane should
+// run to launch us inside the new session. We re-pass every flag the user gave
+// us (so --vault etc. survive the re-exec) and add --in-tmux as the marker.
+func buildSelfInvocation() string {
+	parts := []string{shellQuote(os.Args[0])}
+	if flagVault != "" {
+		parts = append(parts, "--vault", shellQuote(flagVault))
+	}
+	if flagTerminal != "" {
+		parts = append(parts, "--terminal", shellQuote(flagTerminal))
+	}
+	if flagSpawnCmd != "" {
+		parts = append(parts, "--spawn-cmd", shellQuote(flagSpawnCmd))
+	}
+	if flagTUIWidth > 0 {
+		parts = append(parts, fmt.Sprintf("--tui-width=%d", flagTUIWidth))
+	}
+	if flagMinPaneWidth > 0 {
+		parts = append(parts, fmt.Sprintf("--min-pane-width=%d", flagMinPaneWidth))
+	}
+	parts = append(parts, "--in-tmux")
+	return strings.Join(parts, " ")
+}
+
+// shellQuote wraps s in single quotes if it contains shell-meaningful chars.
+// Mirrors config.shellQuote (kept private there); this is the bare minimum
+// needed for argv reconstruction.
+func shellQuote(s string) string {
+	if s == "" {
+		return "''"
+	}
+	safe := true
+	for _, r := range s {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') || r == '/' || r == '_' || r == '-' || r == '.' || r == '=') {
+			safe = false
+			break
+		}
+	}
+	if safe {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 func runList(cmd *cobra.Command, args []string) error {
