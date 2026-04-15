@@ -76,4 +76,17 @@ var (
 				Foreground(lipgloss.Color("229")).
 				PaddingLeft(1).
 				Bold(true)
+
+	activeIndicatorStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("78")).
+				Bold(true)
+
+	inputBoxStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("229")).
+			Padding(0, 2)
+
+	worktreeStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("109")).
+			PaddingLeft(2)
 )
