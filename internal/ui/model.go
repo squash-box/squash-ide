@@ -794,7 +794,11 @@ func (m Model) renderCardList(width, height int) string {
 		end = len(lines)
 	}
 
-	return strings.Join(lines[start:end], "\n") + "\n"
+	// Pad to exactly `height` lines so the card list always fills its
+	// allocated space, pinning the footer (status bar, help) to the bottom.
+	result := make([]string, height)
+	copy(result, lines[start:end])
+	return strings.Join(result, "\n") + "\n"
 }
 
 // statusCounts returns a {status: count} map across all loaded tasks.

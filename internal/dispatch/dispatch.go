@@ -62,6 +62,8 @@ func Run(cfg config.Config, t task.Task) (Result, error) {
 	vars := map[string]string{
 		"cwd":      worktreePath,
 		"task_id":  t.ID,
+		"title":    t.Title,
+		"project":  t.Project,
 		"worktree": worktreePath,
 		"repo":     repoPath,
 		"branch":   branch,
@@ -147,11 +149,16 @@ func Deactivate(cfg config.Config, t task.Task) error {
 
 	branch := BranchFor(t)
 
-	// Kill the task's tmux pane if one is running. Best-effort — the task
-	// may not have a pane (e.g. spawned in OS-window mode), and lookup
-	// failures shouldn't block the deactivation.
+	// Kill the task's tmux panes (header + content) if running. Best-effort
+	// — the task may not have a pane (e.g. spawned in OS-window mode), and
+	// lookup failures shouldn't block the deactivation.
 	if cfg.Tmux.Enabled && tmux.InSession() {
 		tuiPane := tmux.CurrentPaneID()
+		// Kill header pane first (tagged @squash-header=<taskID>)
+		if hdr, err := tmux.FindPaneByOption(tuiPane, "@squash-header", t.ID); err == nil && hdr != "" {
+			_ = tmux.KillPane(hdr)
+		}
+		// Kill content pane (tagged @squash-task=<taskID>)
 		if pane, err := tmux.FindPaneByTask(tuiPane, t.ID); err == nil && pane != "" {
 			_ = tmux.KillPane(pane)
 		}

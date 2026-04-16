@@ -32,9 +32,10 @@ func CurrentPaneID() string {
 
 // Pane describes a single tmux pane.
 type Pane struct {
-	ID    string // tmux pane ID, e.g. "%3"
-	Left  int    // pane_left — column position in the window
-	Width int    // current width in columns
+	ID     string // tmux pane ID, e.g. "%3"
+	Left   int    // pane_left — column position in the window
+	Width  int    // current width in columns
+	Height int    // current height in rows
 }
 
 // ListWindowPanes returns every pane in the window that contains paneID,
@@ -44,7 +45,7 @@ func ListWindowPanes(paneID string) ([]Pane, error) {
 	if target == "" {
 		target = ""
 	}
-	args := []string{"list-panes", "-F", "#{pane_id} #{pane_left} #{pane_width}"}
+	args := []string{"list-panes", "-F", "#{pane_id} #{pane_left} #{pane_width} #{pane_height}"}
 	if target != "" {
 		args = append(args, "-t", target)
 	}
@@ -58,7 +59,7 @@ func ListWindowPanes(paneID string) ([]Pane, error) {
 			continue
 		}
 		fields := strings.Fields(line)
-		if len(fields) != 3 {
+		if len(fields) != 4 {
 			return nil, fmt.Errorf("tmux list-panes: unexpected line %q", line)
 		}
 		left, err := strconv.Atoi(fields[1])
@@ -69,7 +70,11 @@ func ListWindowPanes(paneID string) ([]Pane, error) {
 		if err != nil {
 			return nil, fmt.Errorf("tmux list-panes: bad pane_width %q: %w", fields[2], err)
 		}
-		panes = append(panes, Pane{ID: fields[0], Left: left, Width: width})
+		height, err := strconv.Atoi(fields[3])
+		if err != nil {
+			return nil, fmt.Errorf("tmux list-panes: bad pane_height %q: %w", fields[3], err)
+		}
+		panes = append(panes, Pane{ID: fields[0], Left: left, Width: width, Height: height})
 	}
 	sort.Slice(panes, func(i, j int) bool { return panes[i].Left < panes[j].Left })
 	return panes, nil
@@ -95,6 +100,27 @@ func WindowWidth(paneID string) (int, error) {
 		return 0, fmt.Errorf("parse window_width %q: %w", out, err)
 	}
 	return w, nil
+}
+
+// SplitTop splits the target pane vertically, placing a new pane of the given
+// height (in rows) ABOVE it. Returns the new pane's ID. Used to create the
+// persistent header bar above each spawned task pane.
+func SplitTop(target string, lines int, cmd string) (string, error) {
+	if target == "" {
+		return "", fmt.Errorf("tmux SplitTop: target pane required")
+	}
+	args := []string{
+		"split-window", "-v", "-b",
+		"-t", target,
+		"-l", strconv.Itoa(lines),
+		"-P", "-F", "#{pane_id}",
+		cmd,
+	}
+	out, err := runOut("tmux", args...)
+	if err != nil {
+		return "", fmt.Errorf("tmux split-window (top): %w", err)
+	}
+	return strings.TrimSpace(out), nil
 }
 
 // SplitRight splits the target pane horizontally, opening a new pane to the
@@ -157,18 +183,28 @@ func ReTile(tuiPaneID string, tuiWidth, minPaneWidth int) ([]int, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Right-side panes = everyone except the TUI.
-	right := make([]Pane, 0, len(panes))
+	// Right-side panes = everyone except the TUI. Grouped by column:
+	// panes with the same Left value are stacked vertically (e.g. a
+	// header pane above a task pane) and share one column width. We
+	// deduplicate by Left so Tile computes widths for columns, not
+	// individual panes — then resizing one pane per column is enough
+	// (tmux adjusts the others in the same column automatically).
+	seenLeft := map[int]bool{}
+	var columns []Pane // one representative pane per column
 	for _, p := range panes {
-		if p.ID != tuiPaneID {
-			right = append(right, p)
+		if p.ID == tuiPaneID {
+			continue
+		}
+		if !seenLeft[p.Left] {
+			seenLeft[p.Left] = true
+			columns = append(columns, p)
 		}
 	}
-	if len(right) == 0 {
+	if len(columns) == 0 {
 		// Only the TUI is present — nothing to tile, just pin its width.
 		return nil, ResizePane(tuiPaneID, tuiWidth)
 	}
-	widths, err := Tile(totalCols, tuiWidth, len(right), minPaneWidth)
+	widths, err := Tile(totalCols, tuiWidth, len(columns), minPaneWidth)
 	if err != nil {
 		return nil, err
 	}
@@ -178,9 +214,9 @@ func ReTile(tuiPaneID string, tuiWidth, minPaneWidth int) ([]int, error) {
 	if err := ResizePane(tuiPaneID, tuiWidth); err != nil {
 		return nil, err
 	}
-	for i, p := range right {
-		if err := ResizePane(p.ID, widths[i]); err != nil {
-			return widths, fmt.Errorf("resizing right pane %s: %w", p.ID, err)
+	for i, col := range columns {
+		if err := ResizePane(col.ID, widths[i]); err != nil {
+			return widths, fmt.Errorf("resizing column at left=%d: %w", col.Left, err)
 		}
 	}
 	return widths, nil
@@ -189,6 +225,9 @@ func ReTile(tuiPaneID string, tuiWidth, minPaneWidth int) ([]int, error) {
 // RightmostRightPaneID returns the pane ID of the rightmost non-TUI pane in
 // the window, or "" if no right pane exists. Used to pick the split target
 // so new panes append to the right edge in FIFO order.
+//
+// Panes shorter than 5 rows are skipped — these are header panes pinned
+// above task content and cannot be split further.
 func RightmostRightPaneID(tuiPaneID string) (string, error) {
 	panes, err := ListWindowPanes(tuiPaneID)
 	if err != nil {
@@ -199,6 +238,9 @@ func RightmostRightPaneID(tuiPaneID string) (string, error) {
 	for _, p := range panes {
 		if p.ID == tuiPaneID {
 			continue
+		}
+		if p.Height < 5 {
+			continue // skip header panes
 		}
 		if p.Left > rightmostLeft {
 			rightmost = p.ID
@@ -434,6 +476,22 @@ func FindPaneByRole(windowTarget string, role Role) (string, error) {
 	return "", nil
 }
 
+// SelectPane makes the given pane the active (focused) pane in its window.
+func SelectPane(paneID string) (string, error) {
+	return runOut("tmux", "select-pane", "-t", paneID)
+}
+
+// SetPaneOption sets a user-defined tmux option on a pane.
+func SetPaneOption(paneID, key, value string) error {
+	if paneID == "" {
+		return fmt.Errorf("tmux SetPaneOption: pane id required")
+	}
+	if _, err := runOut("tmux", "set-option", "-pt", paneID, key, value); err != nil {
+		return fmt.Errorf("tmux set-option %s: %w", key, err)
+	}
+	return nil
+}
+
 // SetPaneTask tags a pane with @squash-task=<taskID> so the deactivate
 // flow can locate the pane associated with a given task.
 func SetPaneTask(paneID, taskID string) error {
@@ -464,6 +522,62 @@ func FindPaneByTask(windowTarget, taskID string) (string, error) {
 		}
 	}
 	return "", nil
+}
+
+// FindPaneByOption returns the first pane in the window whose user option
+// named optName matches value, or "" if no such pane exists. This is the
+// generic form — callers like FindPaneByTask and dispatch.Deactivate use
+// it to locate panes tagged with @squash-header, @squash-task, etc.
+func FindPaneByOption(windowTarget, optName, value string) (string, error) {
+	if windowTarget == "" || optName == "" {
+		return "", nil
+	}
+	fmtStr := fmt.Sprintf("#{pane_id} #{%s}", optName)
+	out, err := runOut("tmux", "list-panes", "-t", windowTarget, "-F", fmtStr)
+	if err != nil {
+		return "", fmt.Errorf("tmux list-panes: %w", err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[1] == value {
+			return fields[0], nil
+		}
+	}
+	return "", nil
+}
+
+// GetPaneOption returns the value of a user-defined tmux option on a pane,
+// or "" if the option is not set.
+func GetPaneOption(paneID, key string) (string, error) {
+	if paneID == "" {
+		return "", nil
+	}
+	fmtStr := fmt.Sprintf("#{%s}", key)
+	out, err := runOut("tmux", "display-message", "-p", "-t", paneID, fmtStr)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// KillAllByOption kills every pane in the window whose user option named
+// optName has a non-empty value. Used to tear down all header panes before
+// a horizontal split.
+func KillAllByOption(windowTarget, optName string) {
+	if windowTarget == "" {
+		return
+	}
+	fmtStr := fmt.Sprintf("#{pane_id} #{%s}", optName)
+	out, err := runOut("tmux", "list-panes", "-t", windowTarget, "-F", fmtStr)
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[1] != "" {
+			_ = KillPane(fields[0])
+		}
+	}
 }
 
 // KillPane closes a pane by ID. No-op if paneID is empty.
