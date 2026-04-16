@@ -133,6 +133,41 @@ func MoveToBlocked(vaultRoot string, t task.Task, reason string) (string, error)
 	return dstPath, nil
 }
 
+// MoveToBacklog moves a task file from active/ back to backlog/, resets the
+// frontmatter status to "backlog", and removes the "started" field. This is
+// the inverse of MoveToActive. Returns the new file path.
+func MoveToBacklog(vaultRoot string, t task.Task) (string, error) {
+	srcDir := filepath.Join(vaultRoot, "tasks", "active")
+	dstDir := filepath.Join(vaultRoot, "tasks", "backlog")
+
+	srcPath, err := findTaskFile(srcDir, t.ID)
+	if err != nil {
+		return "", err
+	}
+
+	data, err := os.ReadFile(srcPath)
+	if err != nil {
+		return "", fmt.Errorf("reading task file: %w", err)
+	}
+
+	content := string(data)
+	content = replaceFrontmatterField(content, "status", "backlog")
+	content = removeFrontmatterField(content, "started")
+
+	dstPath := filepath.Join(dstDir, filepath.Base(srcPath))
+	if err := os.MkdirAll(dstDir, 0o755); err != nil {
+		return "", fmt.Errorf("creating backlog dir: %w", err)
+	}
+	if err := os.WriteFile(dstPath, []byte(content), 0o644); err != nil {
+		return "", fmt.Errorf("writing task file: %w", err)
+	}
+	if err := os.Remove(srcPath); err != nil {
+		return "", fmt.Errorf("removing old task file: %w", err)
+	}
+
+	return dstPath, nil
+}
+
 // UpdateBoard moves a task row from the Backlog table to the Active table
 // in tasks/board.md.
 func UpdateBoard(vaultRoot string, t task.Task) error {
@@ -225,6 +260,19 @@ func AppendLogComplete(vaultRoot string, t task.Task, branch string) error {
 	return prependLogEntry(vaultRoot, entry)
 }
 
+// UpdateBoardDeactivate moves a task row from the Active table back to the
+// Backlog section in board.md.
+func UpdateBoardDeactivate(vaultRoot string, t task.Task) error {
+	return mutateBoard(vaultRoot, t.ID, "Backlog", "", false, t)
+}
+
+// AppendLogDeactivate adds a deactivation entry to wiki/log.md.
+func AppendLogDeactivate(vaultRoot string, t task.Task, branch string) error {
+	entry := fmt.Sprintf("## [%s] deactivate | %s %s\nBranch: %s | Moved back to backlog\n",
+		time.Now().Format("2006-01-02"), t.ID, t.Title, branch)
+	return prependLogEntry(vaultRoot, entry)
+}
+
 // AppendLogBlock adds a block entry to wiki/log.md.
 func AppendLogBlock(vaultRoot string, t task.Task, reason string) error {
 	entry := fmt.Sprintf("## [%s] block | %s %s\nReason: %s\n",
@@ -311,6 +359,21 @@ func addFrontmatterField(content, field, value string) string {
 		}
 	}
 	return content
+}
+
+// removeFrontmatterField removes a YAML field line from the frontmatter.
+// If the field is not present, the content is returned unchanged.
+func removeFrontmatterField(content, field string) string {
+	lines := strings.Split(content, "\n")
+	out := lines[:0]
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, field+":") {
+			continue
+		}
+		out = append(out, line)
+	}
+	return strings.Join(out, "\n")
 }
 
 // hasFrontmatterField reports whether the frontmatter contains the field.
