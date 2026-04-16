@@ -9,6 +9,7 @@ import (
 	"github.com/squashbox/squash-ide/internal/spawner"
 	"github.com/squashbox/squash-ide/internal/task"
 	"github.com/squashbox/squash-ide/internal/taskops"
+	"github.com/squashbox/squash-ide/internal/tmux"
 	"github.com/squashbox/squash-ide/internal/vault"
 	"github.com/squashbox/squash-ide/internal/worktree"
 )
@@ -124,6 +125,48 @@ func Block(cfg config.Config, t task.Task, reason string) error {
 		return fmt.Errorf("updating board: %w", err)
 	}
 	if err := taskops.AppendLogBlock(vaultRoot, t, reason); err != nil {
+		return fmt.Errorf("appending to log: %w", err)
+	}
+	return nil
+}
+
+// Deactivate moves an active task back to the backlog: removes the worktree
+// and branch, moves the task file from active/ to backlog/, and updates the
+// board and log. This is the inverse of Run (spawn).
+func Deactivate(cfg config.Config, t task.Task) error {
+	if t.Status != "active" {
+		return fmt.Errorf("task %s has status %q — only active tasks can be deactivated", t.ID, t.Status)
+	}
+
+	vaultRoot := vault.ExpandHome(cfg.Vault)
+
+	repoPath, err := resolveRepo(cfg, t)
+	if err != nil {
+		return err
+	}
+
+	branch := BranchFor(t)
+
+	// Kill the task's tmux pane if one is running. Best-effort — the task
+	// may not have a pane (e.g. spawned in OS-window mode), and lookup
+	// failures shouldn't block the deactivation.
+	if cfg.Tmux.Enabled && tmux.InSession() {
+		tuiPane := tmux.CurrentPaneID()
+		if pane, err := tmux.FindPaneByTask(tuiPane, t.ID); err == nil && pane != "" {
+			_ = tmux.KillPane(pane)
+		}
+	}
+
+	if err := worktree.Remove(repoPath, branch); err != nil {
+		return fmt.Errorf("removing worktree: %w", err)
+	}
+	if _, err := taskops.MoveToBacklog(vaultRoot, t); err != nil {
+		return fmt.Errorf("moving task to backlog: %w", err)
+	}
+	if err := taskops.UpdateBoardDeactivate(vaultRoot, t); err != nil {
+		return fmt.Errorf("updating board: %w", err)
+	}
+	if err := taskops.AppendLogDeactivate(vaultRoot, t, branch); err != nil {
 		return fmt.Errorf("appending to log: %w", err)
 	}
 	return nil

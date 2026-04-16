@@ -25,11 +25,21 @@ const (
 // and detail view.
 const activeIndicator = "●"
 
-// displayItem is either a status header or a task row in the list.
+// displayItem is a row in the list: a status header, a task card, or a
+// dimmed placeholder shown when a section has no tasks (currently only
+// the ACTIVE section, which we always want visible so the user has a
+// clear "nothing running" cue and knows how to activate something).
 type displayItem struct {
-	isHeader bool
-	header   string
-	task     task.Task
+	isHeader      bool
+	isPlaceholder bool
+	header        string
+	placeholder   string
+	task          task.Task
+}
+
+// selectable reports whether the cursor can land on this item.
+func (d displayItem) selectable() bool {
+	return !d.isHeader && !d.isPlaceholder
 }
 
 // Model is the top-level Bubble Tea model.
@@ -54,11 +64,12 @@ type Model struct {
 	err error
 
 	// Dispatch / cleanup state
-	confirming  *task.Task // non-nil when spawn confirmation dialog is showing
-	completing  *task.Task // non-nil when complete confirmation dialog is showing
-	blocking    *task.Task // non-nil when block-reason input is active
-	blockReason string     // current text buffer for the block reason
-	dispatching bool       // true while an async op is in progress
+	confirming   *task.Task // non-nil when spawn confirmation dialog is showing
+	completing   *task.Task // non-nil when complete confirmation dialog is showing
+	deactivating *task.Task // non-nil when deactivate confirmation dialog is showing
+	blocking     *task.Task // non-nil when block-reason input is active
+	blockReason  string     // current text buffer for the block reason
+	dispatching  bool       // true while an async op is in progress
 	statusMsg   string     // transient message for status bar
 	statusIsErr bool       // whether statusMsg is an error
 }
@@ -98,6 +109,10 @@ type blockDoneMsg struct {
 	taskID string
 }
 
+type deactivateDoneMsg struct {
+	taskID string
+}
+
 func (m Model) loadTasks() tea.Msg {
 	tasks, err := vault.ReadAll(m.vaultPath)
 	return tasksLoadedMsg{tasks: tasks, err: err}
@@ -131,6 +146,16 @@ func (m Model) runBlock(t task.Task, reason string) tea.Cmd {
 			return dispatchErrMsg{err: err}
 		}
 		return blockDoneMsg{taskID: t.ID}
+	}
+}
+
+func (m Model) runDeactivate(t task.Task) tea.Cmd {
+	cfg := m.cfg
+	return func() tea.Msg {
+		if err := dispatch.Deactivate(cfg, t); err != nil {
+			return dispatchErrMsg{err: err}
+		}
+		return deactivateDoneMsg{taskID: t.ID}
 	}
 }
 
@@ -175,6 +200,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusIsErr = false
 		return m, m.loadTasks
 
+	case deactivateDoneMsg:
+		m.dispatching = false
+		m.statusMsg = fmt.Sprintf("deactivated %s → backlog", msg.taskID)
+		m.statusIsErr = false
+		return m, m.loadTasks
+
 	case dispatchErrMsg:
 		m.dispatching = false
 		m.statusMsg = msg.err.Error()
@@ -196,6 +227,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Complete confirmation dialog
 	if m.completing != nil {
 		return m.handleCompleteConfirmKey(msg)
+	}
+
+	// Deactivate confirmation dialog
+	if m.deactivating != nil {
+		return m.handleDeactivateConfirmKey(msg)
 	}
 
 	// Spawn confirmation dialog
@@ -244,6 +280,22 @@ func (m Model) handleCompleteConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.runComplete(t)
 	case key.Matches(msg, keys.Deny), key.Matches(msg, keys.Back):
 		m.completing = nil
+		return m, nil
+	}
+	return m, nil
+}
+
+func (m Model) handleDeactivateConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case key.Matches(msg, keys.Confirm), key.Matches(msg, keys.Enter):
+		t := *m.deactivating
+		m.deactivating = nil
+		m.dispatching = true
+		m.statusMsg = fmt.Sprintf("deactivating %s...", t.ID)
+		m.statusIsErr = false
+		return m, m.runDeactivate(t)
+	case key.Matches(msg, keys.Deny), key.Matches(msg, keys.Back):
+		m.deactivating = nil
 		return m, nil
 	}
 	return m, nil
@@ -386,6 +438,23 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.blockReason = ""
 		}
 
+	case key.Matches(msg, keys.Deactivate):
+		if item := m.selectedItem(); item != nil && !item.isHeader {
+			if item.task.Status != "active" {
+				m.statusMsg = fmt.Sprintf("%s is %s — only active tasks can be deactivated",
+					item.task.ID, item.task.Status)
+				m.statusIsErr = true
+				return m, nil
+			}
+			if m.dispatching {
+				m.statusMsg = "another operation is in progress"
+				m.statusIsErr = true
+				return m, nil
+			}
+			t := item.task
+			m.deactivating = &t
+		}
+
 	case key.Matches(msg, keys.Detail):
 		if item := m.selectedItem(); item != nil && !item.isHeader {
 			m.view = detailView
@@ -402,14 +471,14 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// moveCursor moves the cursor by delta, skipping headers.
+// moveCursor moves the cursor by delta, skipping non-selectable rows
+// (section headers and empty-section placeholders).
 func (m *Model) moveCursor(delta int) {
 	if len(m.filtered) == 0 {
 		return
 	}
 	next := m.cursor + delta
-	// Skip headers
-	for next >= 0 && next < len(m.filtered) && m.filtered[next].isHeader {
+	for next >= 0 && next < len(m.filtered) && !m.filtered[next].selectable() {
 		next += delta
 	}
 	if next >= 0 && next < len(m.filtered) {
@@ -428,9 +497,13 @@ func (m *Model) clampCursor() {
 	if m.cursor < 0 {
 		m.cursor = 0
 	}
-	// If cursor is on a header, move to next task
-	if m.filtered[m.cursor].isHeader {
+	// If cursor is on a header or placeholder, walk forward to the first
+	// selectable row; if none exists ahead, walk backward.
+	if !m.filtered[m.cursor].selectable() {
 		m.moveCursor(1)
+		if !m.filtered[m.cursor].selectable() {
+			m.moveCursor(-1)
+		}
 	}
 }
 
@@ -444,8 +517,18 @@ func (m *Model) selectedItem() *displayItem {
 // buildItems groups tasks by status into display items with headers.
 // The order — active, backlog, blocked — surfaces the work in flight
 // first, matching the card-layout mockup.
+//
+// The ACTIVE section is always emitted, even when empty, with a dimmed
+// placeholder item so launching tasks feels like a first-class affordance
+// on an empty board. Other sections remain hidden when they have no
+// content, to keep the board tight.
 func (m *Model) buildItems() {
 	m.items = nil
+	if len(m.allTasks) == 0 {
+		// The empty-vault path in View() renders its own message; don't
+		// emit the ACTIVE placeholder as if tasks were loaded.
+		return
+	}
 	statusOrder := []string{"active", "backlog", "blocked"}
 	grouped := map[string][]task.Task{}
 	for _, t := range m.allTasks {
@@ -453,10 +536,17 @@ func (m *Model) buildItems() {
 	}
 	for _, status := range statusOrder {
 		tasks := grouped[status]
-		if len(tasks) == 0 {
+		if len(tasks) == 0 && status != "active" {
 			continue
 		}
 		m.items = append(m.items, displayItem{isHeader: true, header: status})
+		if len(tasks) == 0 {
+			m.items = append(m.items, displayItem{
+				isPlaceholder: true,
+				placeholder:   "No active tasks — select a task and press enter to launch",
+			})
+			continue
+		}
 		for _, t := range tasks {
 			m.items = append(m.items, displayItem{task: t})
 		}
@@ -478,6 +568,11 @@ func (m *Model) applyFilter() {
 			lastHeader = &m.items[i]
 			continue
 		}
+		// Placeholders never match a filter — they're an empty-section
+		// hint, not searchable content.
+		if item.isPlaceholder {
+			continue
+		}
 		match := strings.Contains(strings.ToLower(item.task.ID), query) ||
 			strings.Contains(strings.ToLower(item.task.Title), query)
 		if match {
@@ -492,7 +587,7 @@ func (m *Model) applyFilter() {
 
 func (m *Model) updateDetailContent() {
 	item := m.selectedItem()
-	if item == nil || item.isHeader {
+	if item == nil || !item.selectable() {
 		return
 	}
 	t := item.task
@@ -533,7 +628,18 @@ func (m Model) View() string {
 }
 
 func (m Model) listViewRender() string {
+	// The task list is always rendered at a fixed width (cfg.Tmux.TUIWidth,
+	// default 60). In tmux mode the pane is pinned to that width anyway, but
+	// clamping here also keeps the layout consistent in no-tmux mode and
+	// during the brief window before tmux finishes reshaping.
 	width := m.width
+	maxWidth := m.cfg.Tmux.TUIWidth
+	if maxWidth <= 0 {
+		maxWidth = 60
+	}
+	if width > maxWidth {
+		width = maxWidth
+	}
 	if width < 40 {
 		width = 40
 	}
@@ -562,7 +668,7 @@ func (m Model) listViewRender() string {
 	if m.filterActive || m.filter != "" {
 		chrome++
 	}
-	if m.confirming != nil || m.completing != nil || m.blocking != nil {
+	if m.confirming != nil || m.completing != nil || m.deactivating != nil || m.blocking != nil {
 		chrome += 3 // dialog box height (border + content + border)
 	}
 	listHeight := m.height - chrome
@@ -580,6 +686,10 @@ func (m Model) listViewRender() string {
 	} else if m.completing != nil {
 		b.WriteString(confirmBoxStyle.Render(
 			fmt.Sprintf("Complete %s? [y/N]", m.completing.ID)))
+		b.WriteString("\n")
+	} else if m.deactivating != nil {
+		b.WriteString(confirmBoxStyle.Render(
+			fmt.Sprintf("Deactivate %s → backlog? [y/N]", m.deactivating.ID)))
 		b.WriteString("\n")
 	} else if m.blocking != nil {
 		prompt := fmt.Sprintf("Block %s — reason: %s█", m.blocking.ID, m.blockReason)
@@ -603,14 +713,14 @@ func (m Model) listViewRender() string {
 
 	// Help
 	switch {
-	case m.confirming != nil, m.completing != nil:
+	case m.confirming != nil, m.completing != nil, m.deactivating != nil:
 		b.WriteString(helpStyle.Render("[y/enter] confirm  [n/esc] cancel"))
 	case m.blocking != nil:
 		b.WriteString(helpStyle.Render("[enter] submit  [esc] cancel  [type] reason"))
 	case m.filterActive:
 		b.WriteString(helpStyle.Render("[enter] apply  [esc] clear  [type] filter"))
 	default:
-		b.WriteString(helpStyle.Render("j/k nav  enter spawn  c complete  b block  tab detail  / filter  r refresh  q quit"))
+		b.WriteString(helpStyle.Render("j/k nav  enter spawn  c complete  d deactivate  b block  tab detail  / filter  r refresh  q quit"))
 	}
 	b.WriteString("\n")
 
@@ -636,6 +746,12 @@ func (m Model) renderCardList(width, height int) string {
 				lines = append(lines, "")
 			}
 			lines = append(lines, renderSectionHeader(item.header))
+			lines = append(lines, "")
+			continue
+		}
+
+		if item.isPlaceholder {
+			lines = append(lines, renderPlaceholder(item.placeholder))
 			lines = append(lines, "")
 			continue
 		}

@@ -2,6 +2,7 @@ package spawner
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"syscall"
 
@@ -61,7 +62,7 @@ func SpawnWith(cfg config.Config, vars map[string]string) error {
 	execCmd := config.BuildExec(cfg.Spawn.Command, spawnArgs)
 
 	if cfg.Tmux.Enabled && tmux.InSession() {
-		return runTmux(cfg.Tmux, vars["cwd"], execCmd)
+		return runTmux(cfg.Tmux, vars["cwd"], execCmd, vars["task_id"])
 	}
 
 	// Add {exec} to the templating context for terminal.args substitution.
@@ -82,10 +83,20 @@ func SpawnWith(cfg config.Config, vars map[string]string) error {
 // is pinned to cfg.TUIWidth. If the new pane would force any pane below
 // cfg.MinPaneWidth, the spawn is aborted and the new pane (already created)
 // is killed so the caller doesn't accumulate orphan panes on rejection.
-func runTmux(t config.Tmux, cwd, execCmd string) error {
+func runTmux(t config.Tmux, cwd, execCmd, taskID string) error {
 	tuiPane := tmux.CurrentPaneID()
 	if tuiPane == "" {
 		return fmt.Errorf("tmux: $TMUX_PANE not set — cannot determine TUI pane")
+	}
+
+	// If the right-hand placeholder pane is still up, kill it before
+	// splitting — the first task should replace the placeholder, not sit
+	// next to it. Lookup failures are non-fatal (we can still spawn; the
+	// placeholder will just get orphaned and the user can close it).
+	if phPane, err := tmux.FindPaneByRole(tuiPane, tmux.RolePlaceholder); err == nil && phPane != "" {
+		if killErr := tmux.KillPane(phPane); killErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not close placeholder pane: %v\n", killErr)
+		}
 	}
 
 	// Pick split target: rightmost existing right pane (so spawns append
@@ -101,6 +112,14 @@ func runTmux(t config.Tmux, cwd, execCmd string) error {
 	newPane, err := tmux.SplitRight(target, cwd, execCmd)
 	if err != nil {
 		return fmt.Errorf("tmux: splitting pane: %w", err)
+	}
+
+	// Tag the pane with the task ID so deactivate/complete can locate and
+	// kill it later. Non-fatal — the pane still works without the tag.
+	if taskID != "" {
+		if tagErr := tmux.SetPaneTask(newPane, taskID); tagErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: tagging pane with task %s: %v\n", taskID, tagErr)
+		}
 	}
 
 	if _, err := tmux.ReTile(tuiPane, t.TUIWidth, t.MinPaneWidth); err != nil {

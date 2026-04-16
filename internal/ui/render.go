@@ -82,6 +82,13 @@ func renderSectionHeader(label string) string {
 	return sectionBarStyle.Render("▌") + " " + sectionLabelStyle.Render(strings.ToUpper(label))
 }
 
+// renderPlaceholder renders a dimmed "no tasks here yet" row under a
+// section header. Indented to match the card body so the section reads
+// as "empty" rather than "misaligned".
+func renderPlaceholder(msg string) string {
+	return "   " + placeholderStyle.Render(msg)
+}
+
 // renderCard renders a task as 2 (backlog) or 3 (active) lines. The first
 // line is the badge for active tasks; the next is the type+id+title row;
 // the last is the project (and, when available, tmux pane / progress —

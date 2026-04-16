@@ -13,8 +13,9 @@ type keyMap struct {
 	Quit     key.Binding
 	Confirm  key.Binding
 	Deny     key.Binding
-	Complete key.Binding
-	Block    key.Binding
+	Complete   key.Binding
+	Block      key.Binding
+	Deactivate key.Binding
 }
 
 var keys = keyMap{
@@ -63,5 +64,9 @@ var keys = keyMap{
 	Block: key.NewBinding(
 		key.WithKeys("b"),
 		key.WithHelp("b", "block"),
+	),
+	Deactivate: key.NewBinding(
+		key.WithKeys("d"),
+		key.WithHelp("d", "deactivate"),
 	),
 }

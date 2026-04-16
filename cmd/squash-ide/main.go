@@ -86,7 +86,14 @@ func main() {
 		RunE:  runConfig,
 	}
 
-	rootCmd.AddCommand(listCmd, spawnCmd, completeCmd, blockCmd, configCmd)
+	placeholderCmd := &cobra.Command{
+		Use:    "placeholder",
+		Short:  "Internal: render the right-hand placeholder pane in tmux mode",
+		Hidden: true,
+		RunE:   runPlaceholder,
+	}
+
+	rootCmd.AddCommand(listCmd, spawnCmd, completeCmd, blockCmd, configCmd, placeholderCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -121,8 +128,12 @@ func runTUI(cmd *cobra.Command, args []string) error {
 			fmt.Fprintln(os.Stderr, "warning: tmux not on PATH; falling back to OS-window spawn (use --no-tmux to silence)")
 		} else {
 			inner := buildSelfInvocation()
-			// Replaces this process. Only returns on exec failure.
-			if err := tmux.EnsureSession(cfg.Tmux.SessionName, inner); err != nil {
+			placeholder := buildPlaceholderInvocation()
+			// Replaces this process on success. Only returns on exec
+			// failure (or bootstrap setup failure before the exec).
+			if err := tmux.EnsureSessionWithPlaceholder(
+				cfg.Tmux.SessionName, inner, placeholder, cfg.Tmux.TUIWidth,
+			); err != nil {
 				return fmt.Errorf("bootstrapping tmux session: %w", err)
 			}
 		}
@@ -131,6 +142,18 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	m := ui.New(cfg)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	_, err = p.Run()
+
+	// When the TUI exits cleanly inside a session we bootstrapped, tear the
+	// whole session down — otherwise the placeholder (or any lingering task
+	// panes) keeps the tmux session alive and the user's `q` looks like a
+	// no-op. We identify "our" session by name match so that running
+	// squash-ide inside the user's own tmux session doesn't nuke their work.
+	if cfg.Tmux.Enabled && tmux.InSession() {
+		if tmux.CurrentSessionName() == cfg.Tmux.SessionName {
+			_ = tmux.KillSession(cfg.Tmux.SessionName)
+		}
+	}
+
 	return err
 }
 
@@ -147,6 +170,25 @@ func buildSelfInvocation() string {
 	}
 	if flagSpawnCmd != "" {
 		parts = append(parts, "--spawn-cmd", shellQuote(flagSpawnCmd))
+	}
+	if flagTUIWidth > 0 {
+		parts = append(parts, fmt.Sprintf("--tui-width=%d", flagTUIWidth))
+	}
+	if flagMinPaneWidth > 0 {
+		parts = append(parts, fmt.Sprintf("--min-pane-width=%d", flagMinPaneWidth))
+	}
+	parts = append(parts, "--in-tmux")
+	return strings.Join(parts, " ")
+}
+
+// buildPlaceholderInvocation reconstructs the command line that the right
+// tmux pane should run to render the placeholder. We forward the same
+// layout-relevant flags (TUI width, min pane width, vault — the placeholder
+// subcommand loads config and respects them) plus the --in-tmux marker.
+func buildPlaceholderInvocation() string {
+	parts := []string{shellQuote(os.Args[0]), "placeholder"}
+	if flagVault != "" {
+		parts = append(parts, "--vault", shellQuote(flagVault))
 	}
 	if flagTUIWidth > 0 {
 		parts = append(parts, fmt.Sprintf("--tui-width=%d", flagTUIWidth))
@@ -308,6 +350,18 @@ func runConfig(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Print(cfg.Format())
 	return nil
+}
+
+// runPlaceholder renders the right-pane placeholder screen. It's invoked
+// by the tmux bootstrap in fresh sessions — see tmux.EnsureSession. Uses
+// the resolved tmux config so the slot count matches what the spawner
+// will actually allow.
+func runPlaceholder(cmd *cobra.Command, args []string) error {
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	return ui.RunPlaceholder(cfg.Tmux.TUIWidth, cfg.Tmux.MinPaneWidth)
 }
 
 // findTask returns the first task with a matching ID, or nil.

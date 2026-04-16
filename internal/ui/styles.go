@@ -41,6 +41,10 @@ var (
 	sectionLabelStyle = lipgloss.NewStyle().
 				Foreground(colorMuted).
 				Bold(true)
+
+	placeholderStyle = lipgloss.NewStyle().
+				Foreground(colorMuted).
+				Italic(true)
 )
 
 // --- Status badges (active sub-states) --------------------------------------

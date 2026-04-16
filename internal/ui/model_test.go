@@ -55,9 +55,13 @@ func TestBuildItems_GroupsByStatus(t *testing.T) {
 	headers := 0
 	taskItems := 0
 	for _, item := range m.items {
-		if item.isHeader {
+		switch {
+		case item.isHeader:
 			headers++
-		} else {
+		case item.isPlaceholder:
+			// No placeholders expected when every section has content.
+			t.Errorf("did not expect placeholder items with full fixture")
+		default:
 			taskItems++
 		}
 	}
@@ -67,6 +71,49 @@ func TestBuildItems_GroupsByStatus(t *testing.T) {
 	// 4 tasks in backlog+active+blocked (done is excluded from display)
 	if taskItems != 4 {
 		t.Errorf("expected 4 task items, got %d", taskItems)
+	}
+}
+
+// When tasks exist but none are active, the ACTIVE section should still
+// render with a placeholder row — the empty-state mockup calls for a
+// "no active tasks" hint so launching feels like a first-class action.
+func TestBuildItems_ActivePlaceholderWhenEmpty(t *testing.T) {
+	// Fixture with backlog + blocked but zero active tasks.
+	tasks := []task.Task{
+		{ID: "T-001", Type: "feature", Title: "First", Project: "p", Status: "backlog"},
+		{ID: "T-004", Type: "chore", Title: "Blocked", Project: "p", Status: "blocked"},
+	}
+	m := modelWithTasks(tasks)
+
+	if len(m.items) < 2 {
+		t.Fatalf("expected items to include ACTIVE header + placeholder, got %d", len(m.items))
+	}
+	if !m.items[0].isHeader || m.items[0].header != "active" {
+		t.Fatalf("first item should be the ACTIVE header, got %+v", m.items[0])
+	}
+	if !m.items[1].isPlaceholder {
+		t.Fatalf("second item should be the empty-active placeholder, got %+v", m.items[1])
+	}
+	if m.items[1].placeholder == "" {
+		t.Error("placeholder text should be non-empty")
+	}
+}
+
+// The ACTIVE placeholder must never be selectable — the cursor should
+// skip past it to the first real task.
+func TestCursorSkipsActivePlaceholder(t *testing.T) {
+	tasks := []task.Task{
+		{ID: "T-001", Type: "feature", Title: "First", Project: "p", Status: "backlog"},
+		{ID: "T-002", Type: "feature", Title: "Second", Project: "p", Status: "backlog"},
+	}
+	m := modelWithTasks(tasks)
+
+	if m.filtered[m.cursor].isPlaceholder || m.filtered[m.cursor].isHeader {
+		t.Fatalf("cursor should not land on header/placeholder, got %+v", m.filtered[m.cursor])
+	}
+	if m.filtered[m.cursor].task.ID != "T-001" {
+		t.Errorf("cursor should start on T-001 (first backlog task), got %s",
+			m.filtered[m.cursor].task.ID)
 	}
 }
 
