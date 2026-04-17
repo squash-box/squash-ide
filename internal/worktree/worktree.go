@@ -2,12 +2,14 @@ package worktree
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
+
+	runexec "github.com/squashbox/squash-ide/internal/exec"
 )
 
 // Typed errors surfaced by Create when the target path already exists on
@@ -39,6 +41,18 @@ func (e *ErrWorktreeBranchMismatch) Error() string {
 		e.Path, e.Existing, e.Expected)
 }
 
+// runner is the process runner used by Create/Remove/Adopt. Swap in tests
+// via SetRunner or use the exported *With variants directly.
+var runner runexec.Runner = runexec.Default
+
+// SetRunner swaps the package-level runner. Returns the previous runner so
+// callers can restore it in cleanup. Intended for tests only.
+func SetRunner(r runexec.Runner) runexec.Runner {
+	prev := runner
+	runner = r
+	return prev
+}
+
 // Path returns the conventional worktree path for a branch inside a given
 // repo's parent directory (<repo-parent>/worktrees/<branch>).
 func Path(repoPath, branch string) string {
@@ -58,13 +72,18 @@ func Path(repoPath, branch string) string {
 //     at all). The directory is left in place — operators can recover with
 //     `squash-ide worktree clean` or `worktree adopt`.
 func Create(repoPath, branch string) (string, error) {
+	return CreateWith(runner, repoPath, branch)
+}
+
+// CreateWith is Create with an explicit Runner, for tests.
+func CreateWith(r runexec.Runner, repoPath, branch string) (string, error) {
 	if _, err := os.Stat(repoPath); err != nil {
 		return "", fmt.Errorf("repo path %s: %w", repoPath, err)
 	}
 
-	fetch := exec.Command("git", "-C", repoPath, "fetch", "origin")
-	fetch.Stderr = os.Stderr
-	if err := fetch.Run(); err != nil {
+	ctx := context.Background()
+
+	if _, err := r.Output(ctx, "git", "-C", repoPath, "fetch", "origin"); err != nil {
 		return "", fmt.Errorf("git fetch origin: %w", err)
 	}
 
@@ -73,7 +92,7 @@ func Create(repoPath, branch string) (string, error) {
 	if _, statErr := os.Stat(worktreePath); statErr == nil {
 		// Path already present — decide between reuse, branch mismatch,
 		// orphan, or non-git-dir.
-		entries, err := listWorktrees(repoPath)
+		entries, err := listWorktreesWith(r, repoPath)
 		if err != nil {
 			return "", fmt.Errorf("listing worktrees: %w", err)
 		}
@@ -100,10 +119,8 @@ func Create(repoPath, branch string) (string, error) {
 		return "", fmt.Errorf("stat worktree path %s: %w", worktreePath, statErr)
 	}
 
-	add := exec.Command("git", "-C", repoPath, "worktree", "add",
-		worktreePath, "-b", branch, "origin/main")
-	add.Stderr = os.Stderr
-	if err := add.Run(); err != nil {
+	if _, err := r.Output(ctx, "git", "-C", repoPath, "worktree", "add",
+		worktreePath, "-b", branch, "origin/main"); err != nil {
 		return "", fmt.Errorf("git worktree add: %w", err)
 	}
 
@@ -111,28 +128,27 @@ func Create(repoPath, branch string) (string, error) {
 }
 
 // Remove removes the worktree for the given branch and deletes the local
-// branch. If the worktree path does not exist (e.g. already removed), it is
-// treated as a no-op — this matches the "cleanup is idempotent" expectation
-// from the TUI. The local branch is deleted with -D; a missing branch is
-// also tolerated. All git commands run from repoPath via -C, so Remove is
-// safe to call even when the caller's cwd is stale or gone.
+// branch. Missing worktree/branch is tolerated (idempotent from the TUI).
+// All git commands run from repoPath via -C, so Remove is safe to call
+// even when the caller's cwd is stale or gone.
 func Remove(repoPath, branch string) error {
+	return RemoveWith(runner, repoPath, branch)
+}
+
+// RemoveWith is Remove with an explicit Runner, for tests.
+func RemoveWith(r runexec.Runner, repoPath, branch string) error {
 	if _, err := os.Stat(repoPath); err != nil {
 		return fmt.Errorf("repo path %s: %w", repoPath, err)
 	}
 
+	ctx := context.Background()
 	worktreePath := Path(repoPath, branch)
+
 	if _, err := os.Stat(worktreePath); err == nil {
-		rm := exec.Command("git", "-C", repoPath, "worktree", "remove", worktreePath)
-		var stderr strings.Builder
-		rm.Stderr = &stderr
-		if err := rm.Run(); err != nil {
-			// Retry with --force if the working tree has modifications. We
-			// surface the stderr so the caller can see what happened.
-			forceRm := exec.Command("git", "-C", repoPath, "worktree", "remove", "--force", worktreePath)
-			forceRm.Stderr = os.Stderr
-			if err2 := forceRm.Run(); err2 != nil {
-				return fmt.Errorf("git worktree remove %s: %w (stderr: %s)", worktreePath, err, stderr.String())
+		if _, err := r.Output(ctx, "git", "-C", repoPath, "worktree", "remove", worktreePath); err != nil {
+			// Retry with --force for dirty worktrees.
+			if _, err2 := r.Output(ctx, "git", "-C", repoPath, "worktree", "remove", "--force", worktreePath); err2 != nil {
+				return fmt.Errorf("git worktree remove %s: %w", worktreePath, err)
 			}
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -140,15 +156,12 @@ func Remove(repoPath, branch string) error {
 	}
 
 	// Delete the local branch. Missing branch is fine.
-	del := exec.Command("git", "-C", repoPath, "branch", "-D", branch)
-	var stderr strings.Builder
-	del.Stderr = &stderr
-	if err := del.Run(); err != nil {
-		msg := stderr.String()
+	if _, err := r.Output(ctx, "git", "-C", repoPath, "branch", "-D", branch); err != nil {
+		msg := err.Error()
 		if strings.Contains(msg, "not found") || strings.Contains(msg, "no branch named") {
 			return nil
 		}
-		return fmt.Errorf("git branch -D %s: %w (stderr: %s)", branch, err, msg)
+		return fmt.Errorf("git branch -D %s: %w", branch, err)
 	}
 
 	return nil
@@ -161,6 +174,11 @@ func Remove(repoPath, branch string) error {
 // reference at all — repair cannot help in that case, so the operator must
 // inspect manually.
 func Adopt(repoPath, branch string) error {
+	return AdoptWith(runner, repoPath, branch)
+}
+
+// AdoptWith is Adopt with an explicit Runner, for tests.
+func AdoptWith(r runexec.Runner, repoPath, branch string) error {
 	if _, err := os.Stat(repoPath); err != nil {
 		return fmt.Errorf("repo path %s: %w", repoPath, err)
 	}
@@ -171,19 +189,16 @@ func Adopt(repoPath, branch string) error {
 	if !hasGitReference(worktreePath) {
 		return fmt.Errorf("%w: %s", ErrWorktreeNotAGitDir, worktreePath)
 	}
-	repair := exec.Command("git", "-C", repoPath, "worktree", "repair", worktreePath)
-	var stderr strings.Builder
-	repair.Stderr = &stderr
-	if err := repair.Run(); err != nil {
-		return fmt.Errorf("git worktree repair %s: %w (stderr: %s)", worktreePath, err, stderr.String())
+	ctx := context.Background()
+	if _, err := r.Output(ctx, "git", "-C", repoPath, "worktree", "repair", worktreePath); err != nil {
+		return fmt.Errorf("git worktree repair %s: %w", worktreePath, err)
 	}
-	// Verify the repair registered something.
-	entries, err := listWorktrees(repoPath)
+	entries, err := listWorktreesWith(r, repoPath)
 	if err != nil {
 		return fmt.Errorf("listing worktrees after repair: %w", err)
 	}
 	if _, ok := findWorktree(entries, worktreePath); !ok {
-		return fmt.Errorf("worktree repair did not register %s (stderr: %s)", worktreePath, stderr.String())
+		return fmt.Errorf("worktree repair did not register %s", worktreePath)
 	}
 	return nil
 }
@@ -194,16 +209,13 @@ type worktreeEntry struct {
 	Branch string // short name ("main"), not "refs/heads/main"; "" if detached
 }
 
-// listWorktrees runs `git worktree list --porcelain` and returns the parsed
-// entries. Stderr is captured (not inherited) so noisy porcelain output
-// can't pollute the TUI.
-func listWorktrees(repoPath string) ([]worktreeEntry, error) {
-	cmd := exec.Command("git", "-C", repoPath, "worktree", "list", "--porcelain")
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
+// listWorktreesWith runs `git worktree list --porcelain` via the given
+// runner and returns the parsed entries.
+func listWorktreesWith(r runexec.Runner, repoPath string) ([]worktreeEntry, error) {
+	ctx := context.Background()
+	out, err := r.Output(ctx, "git", "-C", repoPath, "worktree", "list", "--porcelain")
 	if err != nil {
-		return nil, fmt.Errorf("git worktree list --porcelain: %w (stderr: %s)", err, stderr.String())
+		return nil, fmt.Errorf("git worktree list --porcelain: %w", err)
 	}
 	return parseWorktreeList(string(out)), nil
 }
@@ -278,3 +290,4 @@ func hasGitReference(dir string) bool {
 	_, err := os.Stat(filepath.Join(dir, ".git"))
 	return err == nil
 }
+

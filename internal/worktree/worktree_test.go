@@ -8,96 +8,219 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/squashbox/squash-ide/internal/testutil/fakerunner"
+	"github.com/squashbox/squash-ide/internal/testutil/gitfix"
 )
 
-// setupRepo creates a self-contained git repo with a `main` branch and
-// one seed commit, plus a fake `origin` remote pointing back at itself so
-// `git fetch origin` succeeds. Returns the repo path.
-func setupRepo(t *testing.T) string {
+// repoDir returns a stable subdir of t.TempDir() so canonical worktree
+// paths resolve deterministically across fakerunner expectations.
+func repoDir(t *testing.T) string {
 	t.Helper()
-	tmp := t.TempDir()
-	repo := filepath.Join(tmp, "repo")
-	if err := os.MkdirAll(repo, 0o755); err != nil {
+	d := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(d, 0o755); err != nil {
 		t.Fatal(err)
 	}
-
-	runGit := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
-		cmd.Env = append(os.Environ(),
-			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
-			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com",
-		)
-		var stderr strings.Builder
-		cmd.Stderr = &stderr
-		if err := cmd.Run(); err != nil {
-			t.Fatalf("git %s: %v (stderr: %s)", strings.Join(args, " "), err, stderr.String())
-		}
-	}
-
-	runGit("init", "-b", "main")
-	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("seed\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	runGit("add", "README.md")
-	runGit("commit", "-m", "seed")
-	// Point "origin" at ourselves so `git fetch origin` works.
-	runGit("remote", "add", "origin", repo)
-	runGit("fetch", "origin")
-
-	return repo
+	return d
 }
 
-// worktreeIsRegistered reports whether git considers path a worktree of repo.
-func worktreeIsRegistered(t *testing.T, repo, path string) bool {
+// fakeCreate drives CreateWith on the happy fresh-path branch: fetch, then
+// worktree add. The worktree dir is created by the test harness so the
+// os.Stat "path exists" probe doesn't trigger.
+func fakeCreate(t *testing.T, r *fakerunner.Runner, repo, branch string) string {
 	t.Helper()
-	entries, err := listWorktrees(repo)
-	if err != nil {
-		t.Fatalf("listWorktrees: %v", err)
-	}
-	_, ok := findWorktree(entries, path)
-	return ok
+	r.Expect("git", "-C", repo, "fetch", "origin")
+	r.Expect("git", "-C", repo, "worktree", "add",
+		Path(repo, branch), "-b", branch, "origin/main")
+	return Path(repo, branch)
 }
 
-func TestPath_TypicalRepoPath(t *testing.T) {
-	got := Path("/home/alice/GIT/proj", "feat/foo")
-	want := "/home/alice/GIT/worktrees/feat/foo"
+// --- Path ---------------------------------------------------------------
+
+func TestPath(t *testing.T) {
+	got := Path("/a/b/myrepo", "feat/T-001-x")
+	want := filepath.Join("/a/b", "worktrees", "feat/T-001-x")
 	if got != want {
-		t.Errorf("Path = %q, want %q", got, want)
+		t.Errorf("Path: got %q, want %q", got, want)
 	}
 }
 
 func TestPath_TrailingSlash(t *testing.T) {
-	// Trailing slash on repo path should still produce <repo-parent>/worktrees/...
-	// filepath.Clean drops the trailing slash before Dir.
-	got := Path("/home/alice/GIT/proj/", "feat/foo")
-	want := "/home/alice/GIT/worktrees/feat/foo"
+	// filepath.Clean drops the trailing slash so Dir() still yields the
+	// repo's parent — not the repo itself.
+	got := Path("/a/b/myrepo/", "feat/foo")
+	want := filepath.Join("/a/b", "worktrees", "feat/foo")
 	if got != want {
-		t.Errorf("Path = %q, want %q", got, want)
+		t.Errorf("Path trailing slash: got %q, want %q", got, want)
 	}
 }
+
+// --- CreateWith (fakerunner) -------------------------------------------
 
 func TestCreate_HappyPath(t *testing.T) {
-	repo := setupRepo(t)
-	path, err := Create(repo, "feat/new")
+	repo := repoDir(t)
+	r := fakerunner.New(t)
+	fakeCreate(t, r, repo, "feat/T-001-x")
+
+	got, err := CreateWith(r, repo, "feat/T-001-x")
 	if err != nil {
-		t.Fatalf("Create: %v", err)
+		t.Fatalf("CreateWith: %v", err)
 	}
-	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("worktree dir missing: %v", err)
-	}
-	if !worktreeIsRegistered(t, repo, path) {
-		t.Errorf("worktree not registered with git")
+	if got != Path(repo, "feat/T-001-x") {
+		t.Errorf("returned path: %q", got)
 	}
 }
 
+func TestCreate_RepoMissing(t *testing.T) {
+	r := fakerunner.New(t)
+	r.AllowUnexpected = true
+	_, err := CreateWith(r, "/definitely/not/a/repo", "feat/T-001-x")
+	if err == nil {
+		t.Fatal("expected error for missing repo")
+	}
+}
+
+func TestCreate_FetchFails(t *testing.T) {
+	repo := repoDir(t)
+	r := fakerunner.New(t)
+	r.Expect("git", "-C", repo, "fetch", "origin").
+		ReturnsExitErr(errors.New("network down"))
+	_, err := CreateWith(r, repo, "feat/x")
+	if err == nil {
+		t.Fatal("expected fetch err")
+	}
+	if !strings.Contains(err.Error(), "fetch") {
+		t.Errorf("error should mention fetch: %v", err)
+	}
+}
+
+func TestCreate_WorktreeAddFails(t *testing.T) {
+	repo := repoDir(t)
+	r := fakerunner.New(t)
+	r.Expect("git", "-C", repo, "fetch", "origin")
+	r.Expect("git", "-C", repo, "worktree", "add",
+		Path(repo, "feat/x"), "-b", "feat/x", "origin/main").
+		ReturnsExitErr(errors.New("fatal: not a git repository"))
+	_, err := CreateWith(r, repo, "feat/x")
+	if err == nil {
+		t.Fatal("expected err")
+	}
+	if !strings.Contains(err.Error(), "worktree add") {
+		t.Errorf("error should mention worktree add: %v", err)
+	}
+}
+
+// --- Remove (fakerunner) -----------------------------------------------
+
+func TestRemove_HappyPath(t *testing.T) {
+	repo := repoDir(t)
+	wt := Path(repo, "feat/x")
+	if err := os.MkdirAll(wt, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := fakerunner.New(t)
+	r.Expect("git", "-C", repo, "worktree", "remove", wt)
+	r.Expect("git", "-C", repo, "branch", "-D", "feat/x")
+
+	if err := RemoveWith(r, repo, "feat/x"); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+}
+
+func TestRemove_WorktreeMissing_StillDeletesBranch(t *testing.T) {
+	repo := repoDir(t)
+	r := fakerunner.New(t)
+	// Worktree dir doesn't exist: skip remove, still call branch -D.
+	r.Expect("git", "-C", repo, "branch", "-D", "feat/x")
+
+	if err := RemoveWith(r, repo, "feat/x"); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+}
+
+func TestRemove_DirtyRetriesWithForce(t *testing.T) {
+	repo := repoDir(t)
+	wt := Path(repo, "feat/x")
+	if err := os.MkdirAll(wt, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := fakerunner.New(t)
+	r.Expect("git", "-C", repo, "worktree", "remove", wt).
+		ReturnsExitErr(errors.New("dirty working tree"))
+	r.Expect("git", "-C", repo, "worktree", "remove", "--force", wt)
+	r.Expect("git", "-C", repo, "branch", "-D", "feat/x")
+
+	if err := RemoveWith(r, repo, "feat/x"); err != nil {
+		t.Fatalf("remove dirty: %v", err)
+	}
+}
+
+func TestRemove_BranchNotFound_Tolerated(t *testing.T) {
+	repo := repoDir(t)
+	r := fakerunner.New(t)
+	r.Expect("git", "-C", repo, "branch", "-D", "feat/x").
+		ReturnsExitErr(errors.New("error: branch 'feat/x' not found."))
+
+	if err := RemoveWith(r, repo, "feat/x"); err != nil {
+		t.Fatalf("expected tolerated, got: %v", err)
+	}
+}
+
+// --- Runner swap -------------------------------------------------------
+
+func TestSetRunner_RestoresDefault(t *testing.T) {
+	orig := runner
+	fake := fakerunner.New(t)
+	prev := SetRunner(fake)
+	if prev != orig {
+		t.Error("SetRunner should return previous runner")
+	}
+	if runner != fake {
+		t.Error("runner should be swapped")
+	}
+	SetRunner(orig)
+}
+
+func TestCreate_PublicWrapper(t *testing.T) {
+	repo := repoDir(t)
+	fake := fakerunner.New(t)
+	fakeCreate(t, fake, repo, "feat/pub")
+
+	prev := SetRunner(fake)
+	t.Cleanup(func() { SetRunner(prev) })
+
+	if _, err := Create(repo, "feat/pub"); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+}
+
+func TestRemove_PublicWrapper(t *testing.T) {
+	repo := repoDir(t)
+	fake := fakerunner.New(t)
+	fake.Expect("git", "-C", repo, "branch", "-D", "feat/pub")
+
+	prev := SetRunner(fake)
+	t.Cleanup(func() { SetRunner(prev) })
+
+	if err := Remove(repo, "feat/pub"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+}
+
+// --- Real-git integration tests (T-020 path-collision classification) ---
+//
+// These tests drive the real `git` binary via gitfix so they exercise the
+// actual output of `git worktree list --porcelain` and `git worktree
+// repair` — no amount of fakerunner scripting can cover that correctly.
+
 func TestCreate_Reuse_SameBranch(t *testing.T) {
-	repo := setupRepo(t)
+	origin := gitfix.NewBareOrigin(t)
+	repo := gitfix.Clone(t, origin)
+
 	path, err := Create(repo, "feat/reuse")
 	if err != nil {
 		t.Fatalf("Create (first): %v", err)
 	}
-	// Drop a marker file we can verify survived the second call.
 	marker := filepath.Join(path, "marker.txt")
 	if err := os.WriteFile(marker, []byte("kept"), 0o644); err != nil {
 		t.Fatal(err)
@@ -110,32 +233,32 @@ func TestCreate_Reuse_SameBranch(t *testing.T) {
 	if path2 != path {
 		t.Errorf("Create reuse returned different path: %q vs %q", path2, path)
 	}
-	// Marker must still be there — reuse must not re-run `worktree add`.
+	// Marker survives — reuse did not re-run `worktree add`.
 	if _, err := os.Stat(marker); err != nil {
-		t.Errorf("marker gone after reuse — worktree was recreated: %v", err)
+		t.Errorf("marker gone after reuse: %v", err)
 	}
 }
 
 func TestCreate_BranchMismatch(t *testing.T) {
-	repo := setupRepo(t)
+	origin := gitfix.NewBareOrigin(t)
+	repo := gitfix.Clone(t, origin)
+
 	path, err := Create(repo, "feat/alpha")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	// Second call targeting the canonical path for a different branch.
-	// The conventional path depends on the branch — Path(repo, "feat/beta")
-	// is different from Path(repo, "feat/alpha"). To force the mismatch we
-	// have to place a worktree at the beta path that git knows about, but
-	// registered on a different branch. Easiest: rename the branch on the
-	// existing checkout and re-query.
+	// Move the alpha worktree dir to the canonical beta path, then ask git
+	// to repair the bookkeeping so git now registers feat/alpha at the
+	// beta path. A subsequent Create(feat/beta) must return a branch
+	// mismatch.
 	betaPath := Path(repo, "feat/beta")
+	if err := os.MkdirAll(filepath.Dir(betaPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Rename(path, betaPath); err != nil {
 		t.Fatal(err)
 	}
-	// Tell git where the worktree moved to — `git worktree repair` fixes up
-	// the gitdir references both ways.
-	repair := exec.Command("git", "-C", repo, "worktree", "repair", betaPath)
-	if out, err := repair.CombinedOutput(); err != nil {
+	if out, err := exec.Command("git", "-C", repo, "worktree", "repair", betaPath).CombinedOutput(); err != nil {
 		t.Fatalf("git worktree repair: %v (%s)", err, out)
 	}
 
@@ -153,19 +276,18 @@ func TestCreate_BranchMismatch(t *testing.T) {
 }
 
 func TestCreate_Orphan_HasGitReference(t *testing.T) {
-	repo := setupRepo(t)
+	origin := gitfix.NewBareOrigin(t)
+	repo := gitfix.Clone(t, origin)
+
 	path, err := Create(repo, "feat/gamma")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	// Deregister the worktree (administratively) but keep the directory —
-	// this is the "orphan with a .git reference" state.
-	rm := exec.Command("git", "-C", repo, "worktree", "remove", "--force", path)
-	rm.Env = os.Environ()
-	if out, err := rm.CombinedOutput(); err != nil {
+	// Deregister the worktree but leave a directory with a stale .git file
+	// behind — this is the classic orphan-with-git-ref shape.
+	if out, err := exec.Command("git", "-C", repo, "worktree", "remove", "--force", path).CombinedOutput(); err != nil {
 		t.Fatalf("git worktree remove: %v (%s)", err, out)
 	}
-	// Recreate a bare directory at the same spot with a .git file.
 	if err := os.MkdirAll(path, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -178,19 +300,19 @@ func TestCreate_Orphan_HasGitReference(t *testing.T) {
 	if !errors.Is(err, ErrWorktreeOrphan) {
 		t.Fatalf("Create: expected ErrWorktreeOrphan, got %v", err)
 	}
-	// Directory must be left in place.
 	if _, err := os.Stat(path); err != nil {
 		t.Errorf("orphan dir was removed: %v", err)
 	}
 }
 
 func TestCreate_NonGitOrphan(t *testing.T) {
-	repo := setupRepo(t)
+	origin := gitfix.NewBareOrigin(t)
+	repo := gitfix.Clone(t, origin)
+
 	path := Path(repo, "feat/delta")
 	if err := os.MkdirAll(path, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// No .git reference of any kind.
 	if err := os.WriteFile(filepath.Join(path, "some-file"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -201,81 +323,6 @@ func TestCreate_NonGitOrphan(t *testing.T) {
 	}
 }
 
-func TestCreate_FetchFailure_ShortCircuits(t *testing.T) {
-	repo := t.TempDir()
-	// Not a git repo — fetch will fail before we ever stat the worktree path.
-	_, err := Create(repo, "feat/whatever")
-	if err == nil {
-		t.Fatal("Create: expected error on non-git repo")
-	}
-	// Should mention git fetch, not the worktree path check.
-	if !strings.Contains(err.Error(), "fetch") {
-		t.Errorf("expected fetch failure, got: %v", err)
-	}
-}
-
-func TestRemove_HappyPath(t *testing.T) {
-	repo := setupRepo(t)
-	path, err := Create(repo, "feat/remove")
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-
-	if err := Remove(repo, "feat/remove"); err != nil {
-		t.Fatalf("Remove: %v", err)
-	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Errorf("worktree dir still present: %v", err)
-	}
-	if worktreeIsRegistered(t, repo, path) {
-		t.Errorf("worktree still registered with git")
-	}
-}
-
-func TestRemove_Idempotent_MissingPath(t *testing.T) {
-	repo := setupRepo(t)
-	// Never called Create — nothing there.
-	if err := Remove(repo, "feat/never-created"); err != nil {
-		t.Errorf("Remove on missing path should be no-op, got: %v", err)
-	}
-}
-
-func TestRemove_Idempotent_MissingBranch(t *testing.T) {
-	repo := setupRepo(t)
-	// Call Remove twice — second call should still return nil even though
-	// the branch is already gone.
-	_, err := Create(repo, "feat/twice")
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	if err := Remove(repo, "feat/twice"); err != nil {
-		t.Fatalf("Remove (first): %v", err)
-	}
-	if err := Remove(repo, "feat/twice"); err != nil {
-		t.Errorf("Remove (second) should be no-op, got: %v", err)
-	}
-}
-
-func TestRemove_ForceRetry_ModifiedTree(t *testing.T) {
-	repo := setupRepo(t)
-	path, err := Create(repo, "feat/dirty")
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	// Dirty the worktree — first `git worktree remove` should balk; the
-	// --force retry path should kick in and succeed.
-	if err := os.WriteFile(filepath.Join(path, "dirty.txt"), []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := Remove(repo, "feat/dirty"); err != nil {
-		t.Fatalf("Remove with dirty tree: %v", err)
-	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Errorf("dirty worktree dir still present")
-	}
-}
-
 // TestRemove_StaleCwd is the concrete "stale cwd safety" guard from T-020.
 // If the caller's cwd has been removed from under them, Remove must still
 // succeed because all of its git invocations run from repoPath via -C.
@@ -283,14 +330,14 @@ func TestRemove_StaleCwd(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("chdir semantics differ on windows")
 	}
-	repo := setupRepo(t)
+	origin := gitfix.NewBareOrigin(t)
+	repo := gitfix.Clone(t, origin)
+
 	path, err := Create(repo, "feat/stalecwd")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
-	// Preserve original cwd; restore after test so subsequent tests aren't
-	// poisoned.
 	orig, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -304,7 +351,6 @@ func TestRemove_StaleCwd(t *testing.T) {
 	if err := os.Chdir(throwaway); err != nil {
 		t.Fatal(err)
 	}
-	// Yank the dir out from under us.
 	if err := os.RemoveAll(throwaway); err != nil {
 		t.Fatal(err)
 	}
@@ -318,17 +364,17 @@ func TestRemove_StaleCwd(t *testing.T) {
 }
 
 func TestAdopt_HappyPath(t *testing.T) {
-	repo := setupRepo(t)
+	origin := gitfix.NewBareOrigin(t)
+	repo := gitfix.Clone(t, origin)
 	branch := "feat/adopt"
 	canonical := Path(repo, branch)
 
 	// Register a worktree at a non-canonical path first, then rename it to
-	// the canonical location. git still thinks it lives at "elsewhere" —
+	// the canonical location. git still thinks it lives at "elsewhere";
 	// the canonical path is an orphan on disk until Adopt repairs the
 	// bookkeeping.
 	elsewhere := filepath.Join(t.TempDir(), "elsewhere")
-	add := exec.Command("git", "-C", repo, "worktree", "add", elsewhere, "-b", branch)
-	if out, err := add.CombinedOutput(); err != nil {
+	if out, err := exec.Command("git", "-C", repo, "worktree", "add", elsewhere, "-b", branch).CombinedOutput(); err != nil {
 		t.Fatalf("git worktree add: %v (%s)", err, out)
 	}
 	if err := os.MkdirAll(filepath.Dir(canonical), 0o755); err != nil {
@@ -338,16 +384,8 @@ func TestAdopt_HappyPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Sanity: canonical is an orphan from git's POV right now.
-	if worktreeIsRegistered(t, repo, canonical) {
-		t.Fatalf("precondition: canonical should not be registered yet")
-	}
-
 	if err := Adopt(repo, branch); err != nil {
 		t.Fatalf("Adopt: %v", err)
-	}
-	if !worktreeIsRegistered(t, repo, canonical) {
-		t.Errorf("Adopt did not register worktree at canonical path")
 	}
 
 	// Create after Adopt must take the reuse path.
@@ -361,7 +399,8 @@ func TestAdopt_HappyPath(t *testing.T) {
 }
 
 func TestAdopt_NonGitDir(t *testing.T) {
-	repo := setupRepo(t)
+	origin := gitfix.NewBareOrigin(t)
+	repo := gitfix.Clone(t, origin)
 	path := Path(repo, "feat/notgit")
 	if err := os.MkdirAll(path, 0o755); err != nil {
 		t.Fatal(err)
@@ -371,6 +410,8 @@ func TestAdopt_NonGitDir(t *testing.T) {
 		t.Errorf("Adopt on non-git dir: expected ErrWorktreeNotAGitDir, got %v", err)
 	}
 }
+
+// --- Porcelain parser unit test ----------------------------------------
 
 func TestParseWorktreeList_Porcelain(t *testing.T) {
 	input := `worktree /home/a/proj

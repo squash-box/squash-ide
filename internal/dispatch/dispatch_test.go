@@ -1,136 +1,234 @@
 package dispatch
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/squashbox/squash-ide/internal/config"
+	"github.com/squashbox/squash-ide/internal/spawner"
 	"github.com/squashbox/squash-ide/internal/task"
+	"github.com/squashbox/squash-ide/internal/testutil/fakerunner"
+	"github.com/squashbox/squash-ide/internal/testutil/gitfix"
+	"github.com/squashbox/squash-ide/internal/testutil/vaultfix"
 	"github.com/squashbox/squash-ide/internal/worktree"
 )
 
-// setupRepo mirrors the helper in worktree_test: creates a throwaway git repo
-// with a `main` branch and a self-referential `origin` so fetches succeed.
-func setupRepo(t *testing.T) string {
-	t.Helper()
-	tmp := t.TempDir()
-	repo := filepath.Join(tmp, "repo")
-	if err := os.MkdirAll(repo, 0o755); err != nil {
-		t.Fatal(err)
+func TestBranchFor(t *testing.T) {
+	cases := []struct {
+		id, title, want string
+	}{
+		{"T-001", "Fix the widget", "feat/T-001-fix-the-widget"},
+		{"T-042", "  spaces  ", "feat/T-042-spaces"},
+		{"T-100", "", "feat/T-100-"},
 	}
-	run := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
-		cmd.Env = append(os.Environ(),
-			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
-			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com",
-		)
-		var stderr strings.Builder
-		cmd.Stderr = &stderr
-		if err := cmd.Run(); err != nil {
-			t.Fatalf("git %s: %v (%s)", strings.Join(args, " "), err, stderr.String())
+	for _, c := range cases {
+		got := BranchFor(task.Task{ID: c.id, Title: c.title})
+		if got != c.want {
+			t.Errorf("BranchFor(%q,%q) = %q, want %q", c.id, c.title, got, c.want)
 		}
 	}
-	run("init", "-b", "main")
-	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("seed\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	run("add", "README.md")
-	run("commit", "-m", "seed")
-	run("remote", "add", "origin", repo)
-	run("fetch", "origin")
-	return repo
 }
 
-// setupVault builds a vault skeleton with a single backlog task file
-// referencing the given repo. Returns (vaultRoot, task).
-func setupVault(t *testing.T, repoPath string) (string, task.Task) {
-	t.Helper()
-	root := t.TempDir()
-	for _, d := range []string{"tasks/backlog", "tasks/active", "tasks/blocked", "tasks/archive", "wiki/entities", "wiki"} {
-		if err := os.MkdirAll(filepath.Join(root, d), 0o755); err != nil {
-			t.Fatal(err)
-		}
+func TestWriteMCPConfig_WritesValidJSON(t *testing.T) {
+	wt := t.TempDir()
+	if err := writeMCPConfig(wt, "T-042"); err != nil {
+		t.Fatalf("writeMCPConfig: %v", err)
 	}
-	taskBody := `---
-id: T-999
-type: feature
-title: Dispatch orphan test
-project: test-proj
-status: backlog
-created: 2026-04-17
-priority: high
-repo: ` + repoPath + `
-related:
-  - test-proj
----
+	data, err := os.ReadFile(filepath.Join(wt, ".mcp.json"))
+	if err != nil {
+		t.Fatalf("read .mcp.json: %v", err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, data)
+	}
+	servers, ok := out["mcpServers"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing mcpServers key: %v", out)
+	}
+	squash, ok := servers["squash-ide"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing squash-ide server: %v", servers)
+	}
+	env, ok := squash["env"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing env: %v", squash)
+	}
+	if env["SQUASH_TASK_ID"] != "T-042" {
+		t.Errorf("SQUASH_TASK_ID = %v, want T-042", env["SQUASH_TASK_ID"])
+	}
+}
 
-# T-999
-`
-	if err := os.WriteFile(filepath.Join(root, "tasks/backlog/T-999-dispatch.md"), []byte(taskBody), 0o644); err != nil {
+func TestWriteMCPConfig_TargetNotWritable(t *testing.T) {
+	err := writeMCPConfig("/definitely/not/a/real/dir/nope", "T-001")
+	if err == nil {
+		t.Fatal("expected err")
+	}
+}
+
+func TestResolveRepo_PrefersTaskRepo(t *testing.T) {
+	t.Setenv("HOME", "/home/me")
+	tk := task.Task{ID: "T-001", Project: "proj", Repo: "~/repo-from-task"}
+	got, err := resolveRepo(config.Config{}, tk)
+	if err != nil {
 		t.Fatal(err)
 	}
-	board := `---
-type: board
-title: Test Board
-last_updated: 2026-04-17
----
-
-# Task Board
-
-## Active
-
-_None_
-
-## Backlog
-
-| ID | Project | Title | Type |
-|----|---------|-------|------|
-| [[T-999]] | test-proj | Dispatch orphan test | feature |
-
-## Blocked
-
-_None_
-
-## Recently Completed
-
-_None_
-`
-	if err := os.WriteFile(filepath.Join(root, "tasks/board.md"), []byte(board), 0o644); err != nil {
-		t.Fatal(err)
+	if got != "/home/me/repo-from-task" {
+		t.Errorf("got %q", got)
 	}
-	log := `---
-type: log
-title: Test Log
----
+}
 
-# Activity Log
-`
-	if err := os.WriteFile(filepath.Join(root, "wiki/log.md"), []byte(log), 0o644); err != nil {
-		t.Fatal(err)
+func TestResolveRepo_FallsBackToEntity(t *testing.T) {
+	v := vaultfix.New(t)
+	v.AddEntity("squash-ide", "/home/me/coderepo")
+
+	got, err := resolveRepo(config.Config{Vault: v.Path()}, task.Task{Project: "squash-ide"})
+	if err != nil {
+		t.Fatalf("resolveRepo: %v", err)
 	}
+	if !strings.HasSuffix(got, "/home/me/coderepo") && got != "/home/me/coderepo" {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestResolveRepo_MissingEntity(t *testing.T) {
+	v := vaultfix.New(t)
+	_, err := resolveRepo(config.Config{Vault: v.Path()}, task.Task{Project: "ghost"})
+	if err == nil {
+		t.Fatal("expected err")
+	}
+}
+
+func TestRun_RejectsNonBacklog(t *testing.T) {
+	_, err := Run(config.Config{}, task.Task{ID: "T-001", Status: "active"})
+	if err == nil {
+		t.Fatal("expected err for active task")
+	}
+}
+
+func TestComplete_RejectsNonActive(t *testing.T) {
+	err := Complete(config.Config{}, task.Task{ID: "T-001", Status: "backlog"})
+	if err == nil {
+		t.Fatal("expected err")
+	}
+}
+
+func TestBlock_RejectsNonActive(t *testing.T) {
+	err := Block(config.Config{}, task.Task{ID: "T-001", Status: "backlog"}, "reason")
+	if err == nil {
+		t.Fatal("expected err")
+	}
+}
+
+func TestBlock_RequiresReason(t *testing.T) {
+	err := Block(config.Config{}, task.Task{ID: "T-001", Status: "active"}, "   ")
+	if err == nil {
+		t.Fatal("expected err for empty reason")
+	}
+	if !strings.Contains(err.Error(), "reason") {
+		t.Errorf("should mention reason: %v", err)
+	}
+}
+
+func TestDeactivate_RejectsNonActive(t *testing.T) {
+	err := Deactivate(config.Config{}, task.Task{ID: "T-001", Status: "backlog"})
+	if err == nil {
+		t.Fatal("expected err")
+	}
+}
+
+func TestRun_HappyPath(t *testing.T) {
+	// Real git via gitfix — makes this an integration test (dispatch +
+	// taskops + worktree + .mcp.json) with only the spawner stubbed.
+	origin := gitfix.NewBareOrigin(t)
+	repo := gitfix.Clone(t, origin)
+
+	v := vaultfix.New(t)
+	v.AddBacklog("T-001", "Ship the thing", vaultfix.TaskOpts{Project: "squash-ide", Repo: repo})
 
 	tk := task.Task{
-		ID:      "T-999",
-		Title:   "Dispatch orphan test",
-		Project: "test-proj",
+		ID:      "T-001",
+		Title:   "Ship the thing",
 		Status:  "backlog",
-		Repo:    repoPath,
+		Project: "squash-ide",
+		Repo:    repo,
 	}
-	return root, tk
+
+	cfg := config.Config{
+		Vault:    v.Path(),
+		Tmux:     config.Tmux{Enabled: false},
+		Terminal: config.Terminal{Command: "fake-term", Args: []string{"{exec}"}},
+		Spawn:    config.Spawn{Command: "claude", Args: []string{}},
+	}
+
+	// Stub only the spawner's process runner.
+	spFake := fakerunner.New(t)
+	prevSP := spawner.SetRunner(spFake)
+	t.Cleanup(func() { spawner.SetRunner(prevSP) })
+	spFake.ExpectLookPath("fake-term").ReturnsLookPath("/bin/fake-term")
+	spFake.Expect("/bin/fake-term", "claude")
+
+	res, err := Run(cfg, tk)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Branch != "feat/T-001-ship-the-thing" {
+		t.Errorf("branch = %q", res.Branch)
+	}
+
+	// Vault side effects.
+	actives, _ := os.ReadDir(filepath.Join(v.Path(), "tasks/active"))
+	if len(actives) == 0 {
+		t.Fatal("task not moved to active/")
+	}
+	if !strings.Contains(v.ReadBoard(), "T-001") {
+		t.Error("board missing T-001")
+	}
+	if !strings.Contains(v.ReadLog(), "T-001") {
+		t.Error("log missing T-001")
+	}
+
+	wt := res.WorktreePath
+	if _, err := os.Stat(filepath.Join(wt, ".mcp.json")); err != nil {
+		t.Errorf(".mcp.json missing: %v", err)
+	}
 }
 
+func TestWorktreePathFor(t *testing.T) {
+	t.Setenv("HOME", "/home/me")
+	tk := task.Task{ID: "T-001", Title: "test thing", Repo: "/tmp/repo"}
+	got, err := WorktreePathFor(config.Config{}, tk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(got, "worktrees/feat/T-001-test-thing") {
+		t.Errorf("unexpected path: %q", got)
+	}
+}
+
+// --- T-020: structured worktree-error pass-through ---------------------
+
 // TestRun_OrphanErrorPassThrough confirms that when the worktree path is
-// already occupied by a non-registered directory, Run surfaces the typed
-// error (via errors.Is) AND annotates the message with the operator-facing
-// subcommand hint naming the exact recovery path.
+// already occupied by a non-registered directory with a .git reference,
+// Run surfaces the typed error (via errors.Is) AND annotates the message
+// with operator-facing subcommand hints naming the exact recovery path.
 func TestRun_OrphanErrorPassThrough(t *testing.T) {
-	repo := setupRepo(t)
-	vaultRoot, tk := setupVault(t, repo)
+	origin := gitfix.NewBareOrigin(t)
+	repo := gitfix.Clone(t, origin)
+
+	v := vaultfix.New(t)
+	v.AddBacklog("T-020", "Dispatch orphan test", vaultfix.TaskOpts{Project: "squash-ide", Repo: repo})
+	tk := task.Task{
+		ID:      "T-020",
+		Title:   "Dispatch orphan test",
+		Status:  "backlog",
+		Project: "squash-ide",
+		Repo:    repo,
+	}
 
 	// Pre-seed an orphan directory at the canonical worktree path.
 	branch := BranchFor(tk)
@@ -138,14 +236,11 @@ func TestRun_OrphanErrorPassThrough(t *testing.T) {
 	if err := os.MkdirAll(orphanPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// Give it a .git reference so the orphan is classified as
-	// ErrWorktreeOrphan (not ErrWorktreeNotAGitDir).
 	if err := os.WriteFile(filepath.Join(orphanPath, ".git"), []byte("gitdir: "+repo+"/.git\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	cfg := config.Config{Vault: vaultRoot}
-	cfg.Tmux.Enabled = false
+	cfg := config.Config{Vault: v.Path(), Tmux: config.Tmux{Enabled: false}}
 
 	_, err := Run(cfg, tk)
 	if err == nil {
@@ -154,10 +249,10 @@ func TestRun_OrphanErrorPassThrough(t *testing.T) {
 	if !errors.Is(err, worktree.ErrWorktreeOrphan) {
 		t.Errorf("expected errors.Is(err, ErrWorktreeOrphan), got %v", err)
 	}
-	if !strings.Contains(err.Error(), "squash-ide worktree adopt T-999") {
+	if !strings.Contains(err.Error(), "squash-ide worktree adopt T-020") {
 		t.Errorf("expected adopt hint in message, got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "squash-ide worktree clean T-999") {
+	if !strings.Contains(err.Error(), "squash-ide worktree clean T-020") {
 		t.Errorf("expected clean hint in message, got: %v", err)
 	}
 
@@ -167,30 +262,39 @@ func TestRun_OrphanErrorPassThrough(t *testing.T) {
 	}
 
 	// Task must still be in backlog (no vault mutation on failure).
-	if _, err := os.Stat(filepath.Join(vaultRoot, "tasks/backlog/T-999-dispatch.md")); err != nil {
-		t.Errorf("task file moved out of backlog after failed spawn: %v", err)
+	matches, _ := filepath.Glob(filepath.Join(v.Path(), "tasks/backlog/T-020-*.md"))
+	if len(matches) == 0 {
+		t.Errorf("task file moved out of backlog after failed spawn")
 	}
 }
 
 // TestRun_NonGitOrphanErrorPassThrough covers the sibling "no .git reference
-// at all" classification, which needs a different operator hint — inspect
+// at all" classification, which gets a different operator hint — inspect
 // manually, then clean.
 func TestRun_NonGitOrphanErrorPassThrough(t *testing.T) {
-	repo := setupRepo(t)
-	vaultRoot, tk := setupVault(t, repo)
+	origin := gitfix.NewBareOrigin(t)
+	repo := gitfix.Clone(t, origin)
+
+	v := vaultfix.New(t)
+	v.AddBacklog("T-020", "Dispatch orphan test", vaultfix.TaskOpts{Project: "squash-ide", Repo: repo})
+	tk := task.Task{
+		ID:      "T-020",
+		Title:   "Dispatch orphan test",
+		Status:  "backlog",
+		Project: "squash-ide",
+		Repo:    repo,
+	}
 
 	branch := BranchFor(tk)
 	orphanPath := worktree.Path(repo, branch)
 	if err := os.MkdirAll(orphanPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// No .git reference — ErrWorktreeNotAGitDir path.
 	if err := os.WriteFile(filepath.Join(orphanPath, "bystander.txt"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	cfg := config.Config{Vault: vaultRoot}
-	cfg.Tmux.Enabled = false
+	cfg := config.Config{Vault: v.Path(), Tmux: config.Tmux{Enabled: false}}
 
 	_, err := Run(cfg, tk)
 	if !errors.Is(err, worktree.ErrWorktreeNotAGitDir) {

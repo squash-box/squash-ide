@@ -68,8 +68,8 @@ type Model struct {
 
 	err error
 
-	resetCursorOnLoad bool // scroll to top after next tasksLoadedMsg
-	tooNarrow         bool // true when zoomed due to narrow terminal
+	resetCursorOnLoad bool              // scroll to top after next tasksLoadedMsg
+	tooNarrow         bool              // true when zoomed due to narrow terminal
 	needsRespawn      bool              // true until the first task load triggers respawn
 	RespawnFunc       func([]task.Task) // called once after first load to respawn active panes
 
@@ -83,8 +83,8 @@ type Model struct {
 	blocking     *task.Task // non-nil when block-reason input is active
 	blockReason  string     // current text buffer for the block reason
 	dispatching  bool       // true while an async op is in progress
-	statusMsg   string     // transient message for status bar
-	statusIsErr bool       // whether statusMsg is an error
+	statusMsg    string     // transient message for status bar
+	statusIsErr  bool       // whether statusMsg is an error
 }
 
 // New creates a new Model from the resolved config.
@@ -758,7 +758,6 @@ func (m Model) View() string {
 	}
 	return m.listViewRender()
 }
-
 
 func (m Model) listViewRender() string {
 	// The task list is always rendered at a fixed width (cfg.Tmux.TUIWidth,

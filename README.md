@@ -235,12 +235,36 @@ testdata/                        Test fixture markdown files
 ## Development
 
 ```bash
-make test       # go test ./...
-make vet        # go vet ./...
-make fmt        # gofmt -w .
-make build      # ./bin/squash-ide
-make clean      # rm -rf bin dist
+make build         # ./bin/squash-ide + ./bin/squash-ide-mcp
+make test          # unit + e2e (race detector + coverage)
+make test-unit     # fast path, no external binaries
+make test-e2e      # e2e suite (needs git on PATH)
+make cover         # per-function coverage from coverage.out
+make vet           # go vet ./...
+make fmt           # gofmt -w .
+make clean         # rm -rf bin dist coverage.*
 ```
+
+## Testing
+
+The test suite is layered:
+
+- **Unit tests** — each package has a `*_test.go` covering its exported
+  surface. External processes are stubbed via `internal/exec.Runner` +
+  `internal/testutil/fakerunner`; vault and git are built on disk via
+  `internal/testutil/vaultfix` and `internal/testutil/gitfix`.
+- **End-to-end tests** live under `e2e/` behind a `//go:build e2e` build
+  tag. They build the real binaries, drive them through `os/exec` against
+  a fixture vault + real git repo, and assert on vault state, board, log,
+  worktree layout, and the MCP JSON-RPC handshake.
+
+Run both layers via `make test`. CI (`.github/workflows/ci.yml`) runs
+lint, unit, and e2e as parallel jobs and enforces a coverage floor on
+every PR — see the `coverage gate` step for the current threshold.
+
+TUI snapshot tests are not yet wired up (follow-up); tmux pane-layout
+tests that need a real tmux session are gated behind `-tags=e2e_tmux`
+and are not run in CI (`make test-e2e-tmux` to run locally).
 
 ## Troubleshooting
 

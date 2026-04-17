@@ -15,6 +15,10 @@ import (
 // Dir is the directory where status files are written.
 const Dir = "/tmp/squash-ide/status"
 
+// dirRef is the effective status directory. Tests swap it via the package's
+// test helper; production keeps it at Dir.
+var dirRef = Dir
+
 // StaleDuration is how long a status file is considered valid. Files older
 // than this are ignored by ReadAll (the Claude session likely exited).
 const StaleDuration = 5 * time.Minute
@@ -29,7 +33,7 @@ type File struct {
 
 // Write atomically writes a status file for the given task.
 func Write(taskID, state, message string) error {
-	if err := os.MkdirAll(Dir, 0755); err != nil {
+	if err := os.MkdirAll(dirRef, 0755); err != nil {
 		return err
 	}
 
@@ -46,8 +50,8 @@ func Write(taskID, state, message string) error {
 	}
 
 	// Write to temp file then rename for atomicity.
-	tmp := filepath.Join(Dir, taskID+".tmp")
-	target := filepath.Join(Dir, taskID+".json")
+	tmp := filepath.Join(dirRef, taskID+".tmp")
+	target := filepath.Join(dirRef, taskID+".json")
 
 	if err := os.WriteFile(tmp, data, 0644); err != nil {
 		return err
@@ -57,7 +61,7 @@ func Write(taskID, state, message string) error {
 
 // ReadAll reads all non-stale status files and returns them keyed by task ID.
 func ReadAll() (map[string]File, error) {
-	entries, err := filepath.Glob(filepath.Join(Dir, "T-*.json"))
+	entries, err := filepath.Glob(filepath.Join(dirRef, "T-*.json"))
 	if err != nil {
 		return nil, err
 	}
@@ -90,7 +94,7 @@ func ReadAll() (map[string]File, error) {
 // Remove deletes the status file for a task. It is not an error if the
 // file does not exist.
 func Remove(taskID string) error {
-	err := os.Remove(filepath.Join(Dir, taskID+".json"))
+	err := os.Remove(filepath.Join(dirRef, taskID+".json"))
 	if os.IsNotExist(err) {
 		return nil
 	}

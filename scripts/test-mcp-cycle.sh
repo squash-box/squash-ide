@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # test-mcp-cycle.sh — fake Claude session that cycles through MCP states.
 #
+# For the automated JSON-RPC handshake test, see e2e/mcp_status_test.go
+# (run with `make test-e2e`). This script is kept as a manual dogfooding
+# helper for hands-on testing of pane-border state transitions.
+#
 # Usage (standalone):
 #   ./scripts/test-mcp-cycle.sh T-012
 #
