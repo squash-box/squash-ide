@@ -3,16 +3,16 @@ package ui
 import "github.com/charmbracelet/bubbles/key"
 
 type keyMap struct {
-	Up       key.Binding
-	Down     key.Binding
-	Enter    key.Binding
-	Detail   key.Binding
-	Back     key.Binding
-	Filter   key.Binding
-	Refresh  key.Binding
-	Quit     key.Binding
-	Confirm  key.Binding
-	Deny     key.Binding
+	Up         key.Binding
+	Down       key.Binding
+	Enter      key.Binding
+	Detail     key.Binding
+	Back       key.Binding
+	Filter     key.Binding
+	Refresh    key.Binding
+	Quit       key.Binding
+	Confirm    key.Binding
+	Deny       key.Binding
 	Complete   key.Binding
 	Block      key.Binding
 	Deactivate key.Binding

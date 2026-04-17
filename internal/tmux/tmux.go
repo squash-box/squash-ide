@@ -600,10 +600,26 @@ func CurrentSessionName() string {
 	return strings.TrimSpace(out)
 }
 
-// runOut runs cmd with args and returns combined stdout (trimmed of leading/
-// trailing whitespace handled by callers). Stderr is folded into the error
-// message on failure so the caller sees what tmux complained about.
+// runOutFn is the indirection point tests swap to avoid real tmux calls.
+// Signature matches the original runOut (name, args...) -> (stdout, err).
+var runOutFn = runOutReal
+
+// SetRunOutFn swaps the runOut implementation and returns the previous one.
+// Tests only — production code uses the real tmux binary via runOutReal.
+func SetRunOutFn(fn func(name string, args ...string) (string, error)) func(name string, args ...string) (string, error) {
+	prev := runOutFn
+	runOutFn = fn
+	return prev
+}
+
+// runOut is the public-to-the-package entry point. It delegates to runOutFn,
+// which in tests can be redirected to a fake.
 func runOut(name string, args ...string) (string, error) {
+	return runOutFn(name, args...)
+}
+
+// runOutReal is the production implementation.
+func runOutReal(name string, args ...string) (string, error) {
 	c := exec.Command(name, args...)
 	out, err := c.Output()
 	if err != nil {
