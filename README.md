@@ -294,6 +294,39 @@ contained uncommitted files, `git worktree remove` falls back to `--force`.
 If that also fails (rare), remove manually: `git worktree remove --force
 <path>` then `git branch -D <branch>`.
 
+### Recovering from a wedged worktree
+
+`squash-ide` owns the worktree lifecycle end-to-end: `spawn` creates,
+`complete` / `deactivate` remove. If an agent (e.g. the `/implement` skill
+in an earlier version) aborts partway through, you can end up with a
+directory at the canonical worktree path that git does not know about.
+`squash-ide spawn T-NNN` refuses to blindly overwrite this — it returns a
+structured error pointing you at one of two recovery subcommands:
+
+```bash
+# The directory is a real worktree whose git bookkeeping is out of sync —
+# re-register it so the next `spawn` adopts it.
+squash-ide worktree adopt T-NNN
+
+# The directory is junk (or you've decided the work is lost) — wipe it
+# and delete the local branch so a fresh `spawn` can proceed.
+squash-ide worktree clean T-NNN
+
+# On an *active* task, `clean` refuses by default. If you really want to
+# abandon the task (sends it back to backlog, tears down its tmux pane),
+# pass --deactivate:
+squash-ide worktree clean T-NNN --deactivate
+```
+
+`adopt` runs `git worktree repair` internally and is safe when the directory
+has a `.git` reference pointing back at the main repo. It refuses a
+non-git directory outright — in that case use `clean`.
+
+If `spawn` reports `worktree path is registered on branch X, expected Y`,
+a different task previously claimed the same path (unusual unless you
+renamed a task title). Run `squash-ide worktree clean T-NNN` to discard
+and re-spawn.
+
 ## Release
 
 `v0.1.0` is the first tagged release. To cut a new one:

@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/squashbox/squash-ide/internal/testutil/fakerunner"
 	"github.com/squashbox/squash-ide/internal/testutil/gitfix"
 	"github.com/squashbox/squash-ide/internal/testutil/vaultfix"
+	"github.com/squashbox/squash-ide/internal/worktree"
 )
 
 func TestBranchFor(t *testing.T) {
@@ -62,7 +64,6 @@ func TestWriteMCPConfig_WritesValidJSON(t *testing.T) {
 }
 
 func TestWriteMCPConfig_TargetNotWritable(t *testing.T) {
-	// Pass a path that doesn't exist to force WriteFile to error.
 	err := writeMCPConfig("/definitely/not/a/real/dir/nope", "T-001")
 	if err == nil {
 		t.Fatal("expected err")
@@ -96,7 +97,6 @@ func TestResolveRepo_FallsBackToEntity(t *testing.T) {
 
 func TestResolveRepo_MissingEntity(t *testing.T) {
 	v := vaultfix.New(t)
-	// No entity for "ghost" — expect an error.
 	_, err := resolveRepo(config.Config{Vault: v.Path()}, task.Task{Project: "ghost"})
 	if err == nil {
 		t.Fatal("expected err")
@@ -192,7 +192,6 @@ func TestRun_HappyPath(t *testing.T) {
 		t.Error("log missing T-001")
 	}
 
-	// .mcp.json written.
 	wt := res.WorktreePath
 	if _, err := os.Stat(filepath.Join(wt, ".mcp.json")); err != nil {
 		t.Errorf(".mcp.json missing: %v", err)
@@ -208,5 +207,100 @@ func TestWorktreePathFor(t *testing.T) {
 	}
 	if !strings.HasSuffix(got, "worktrees/feat/T-001-test-thing") {
 		t.Errorf("unexpected path: %q", got)
+	}
+}
+
+// --- T-020: structured worktree-error pass-through ---------------------
+
+// TestRun_OrphanErrorPassThrough confirms that when the worktree path is
+// already occupied by a non-registered directory with a .git reference,
+// Run surfaces the typed error (via errors.Is) AND annotates the message
+// with operator-facing subcommand hints naming the exact recovery path.
+func TestRun_OrphanErrorPassThrough(t *testing.T) {
+	origin := gitfix.NewBareOrigin(t)
+	repo := gitfix.Clone(t, origin)
+
+	v := vaultfix.New(t)
+	v.AddBacklog("T-020", "Dispatch orphan test", vaultfix.TaskOpts{Project: "squash-ide", Repo: repo})
+	tk := task.Task{
+		ID:      "T-020",
+		Title:   "Dispatch orphan test",
+		Status:  "backlog",
+		Project: "squash-ide",
+		Repo:    repo,
+	}
+
+	// Pre-seed an orphan directory at the canonical worktree path.
+	branch := BranchFor(tk)
+	orphanPath := worktree.Path(repo, branch)
+	if err := os.MkdirAll(orphanPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(orphanPath, ".git"), []byte("gitdir: "+repo+"/.git\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Config{Vault: v.Path(), Tmux: config.Tmux{Enabled: false}}
+
+	_, err := Run(cfg, tk)
+	if err == nil {
+		t.Fatal("Run: expected error on orphan worktree path")
+	}
+	if !errors.Is(err, worktree.ErrWorktreeOrphan) {
+		t.Errorf("expected errors.Is(err, ErrWorktreeOrphan), got %v", err)
+	}
+	if !strings.Contains(err.Error(), "squash-ide worktree adopt T-020") {
+		t.Errorf("expected adopt hint in message, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "squash-ide worktree clean T-020") {
+		t.Errorf("expected clean hint in message, got: %v", err)
+	}
+
+	// Orphan dir must not have been deleted by Run.
+	if _, err := os.Stat(orphanPath); err != nil {
+		t.Errorf("orphan dir disappeared: %v", err)
+	}
+
+	// Task must still be in backlog (no vault mutation on failure).
+	matches, _ := filepath.Glob(filepath.Join(v.Path(), "tasks/backlog/T-020-*.md"))
+	if len(matches) == 0 {
+		t.Errorf("task file moved out of backlog after failed spawn")
+	}
+}
+
+// TestRun_NonGitOrphanErrorPassThrough covers the sibling "no .git reference
+// at all" classification, which gets a different operator hint — inspect
+// manually, then clean.
+func TestRun_NonGitOrphanErrorPassThrough(t *testing.T) {
+	origin := gitfix.NewBareOrigin(t)
+	repo := gitfix.Clone(t, origin)
+
+	v := vaultfix.New(t)
+	v.AddBacklog("T-020", "Dispatch orphan test", vaultfix.TaskOpts{Project: "squash-ide", Repo: repo})
+	tk := task.Task{
+		ID:      "T-020",
+		Title:   "Dispatch orphan test",
+		Status:  "backlog",
+		Project: "squash-ide",
+		Repo:    repo,
+	}
+
+	branch := BranchFor(tk)
+	orphanPath := worktree.Path(repo, branch)
+	if err := os.MkdirAll(orphanPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(orphanPath, "bystander.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Config{Vault: v.Path(), Tmux: config.Tmux{Enabled: false}}
+
+	_, err := Run(cfg, tk)
+	if !errors.Is(err, worktree.ErrWorktreeNotAGitDir) {
+		t.Fatalf("expected errors.Is(err, ErrWorktreeNotAGitDir), got %v", err)
+	}
+	if !strings.Contains(err.Error(), "inspect the directory manually") {
+		t.Errorf("expected manual-inspect hint, got: %v", err)
 	}
 }

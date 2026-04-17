@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -64,9 +65,29 @@ func Run(cfg config.Config, t task.Task) (Result, error) {
 		}
 	}
 
-	// Create worktree
+	// Create worktree. If the path already exists we translate the typed
+	// errors from worktree.Create into operator-facing hints naming the
+	// exact subcommand to run next. %w is preserved so callers can still
+	// errors.Is / errors.As against the sentinels.
 	worktreePath, err := worktree.Create(repoPath, branch)
 	if err != nil {
+		switch {
+		case errors.Is(err, worktree.ErrWorktreeOrphan):
+			return Result{}, fmt.Errorf(
+				"creating worktree: %w — run `squash-ide worktree adopt %s` "+
+					"to re-register it, or `squash-ide worktree clean %s` to discard",
+				err, t.ID, t.ID)
+		case errors.Is(err, worktree.ErrWorktreeNotAGitDir):
+			return Result{}, fmt.Errorf(
+				"creating worktree: %w — inspect the directory manually, "+
+					"then `squash-ide worktree clean %s` to remove it",
+				err, t.ID)
+		case errors.As(err, new(*worktree.ErrWorktreeBranchMismatch)):
+			return Result{}, fmt.Errorf(
+				"creating worktree: %w — run `squash-ide worktree clean %s` "+
+					"to discard the existing worktree before re-spawning",
+				err, t.ID)
+		}
 		return Result{}, fmt.Errorf("creating worktree: %w", err)
 	}
 
@@ -279,6 +300,14 @@ func writeMCPConfig(worktreePath, taskID string) error {
 		return err
 	}
 	return os.WriteFile(filepath.Join(worktreePath, ".mcp.json"), append(data, '\n'), 0644)
+}
+
+// RepoPathFor resolves the absolute repo path for a task using the same
+// rules as the internal dispatch flow (task.repo field, else project's
+// entity page). Exposed for CLI subcommands that need the repo path
+// without running a full dispatch action.
+func RepoPathFor(cfg config.Config, t task.Task) (string, error) {
+	return resolveRepo(cfg, t)
 }
 
 // resolveRepo returns the absolute repo path for a task: the task's repo
