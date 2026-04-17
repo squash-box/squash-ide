@@ -15,6 +15,7 @@ import (
 	"github.com/squashbox/squash-ide/internal/tmux"
 	"github.com/squashbox/squash-ide/internal/ui"
 	"github.com/squashbox/squash-ide/internal/vault"
+	"github.com/squashbox/squash-ide/internal/worktree"
 )
 
 // version is set via -ldflags "-X main.version=vX.Y.Z" at build time.
@@ -101,7 +102,32 @@ func main() {
 		RunE:   runRetile,
 	}
 
-	rootCmd.AddCommand(listCmd, spawnCmd, completeCmd, blockCmd, configCmd, placeholderCmd, retileCmd)
+	worktreeCmd := &cobra.Command{
+		Use:   "worktree",
+		Short: "Manage git worktrees for tasks (clean, adopt)",
+	}
+	worktreeCleanCmd := &cobra.Command{
+		Use:   "clean <task-id>",
+		Short: "Force-remove a task's worktree directory and local branch",
+		Long: `Clean the worktree and local branch for a task without touching vault
+state. Useful when a previous run left an orphan directory behind.
+
+Refuses to run on an 'active' task unless --deactivate is passed, in which
+case it delegates to the full dispatch.Deactivate flow (moves the task back
+to backlog, updates board/log, tears down the tmux pane).`,
+		Args: cobra.ExactArgs(1),
+		RunE: runWorktreeClean,
+	}
+	worktreeCleanCmd.Flags().Bool("deactivate", false, "if the task is active, deactivate it (move back to backlog) as part of cleanup")
+	worktreeAdoptCmd := &cobra.Command{
+		Use:   "adopt <task-id>",
+		Short: "Re-register an orphan worktree directory via `git worktree repair`",
+		Args:  cobra.ExactArgs(1),
+		RunE:  runWorktreeAdopt,
+	}
+	worktreeCmd.AddCommand(worktreeCleanCmd, worktreeAdoptCmd)
+
+	rootCmd.AddCommand(listCmd, spawnCmd, completeCmd, blockCmd, configCmd, worktreeCmd, placeholderCmd, retileCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -460,6 +486,91 @@ func respawnActive(cfg config.Config, tasks []task.Task) {
 			}
 		}
 	}
+}
+
+// runWorktreeClean forces worktree + local-branch removal for a task.
+// By default refuses to run on active tasks; with --deactivate it dispatches
+// through Deactivate so vault state (board, log, status) stays consistent.
+func runWorktreeClean(cmd *cobra.Command, args []string) error {
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+
+	taskID := args[0]
+	deactivate, _ := cmd.Flags().GetBool("deactivate")
+
+	tasks, err := vault.ReadAll(cfg.Vault)
+	if err != nil {
+		return fmt.Errorf("reading vault: %w", err)
+	}
+	target := findTask(tasks, taskID)
+	if target == nil {
+		return fmt.Errorf("task %s not found in vault", taskID)
+	}
+
+	if target.Status == "active" {
+		if !deactivate {
+			return fmt.Errorf(
+				"task %s is active — refusing to clean worktree without --deactivate "+
+					"(pass --deactivate to move the task back to backlog as part of cleanup)",
+				taskID)
+		}
+		fmt.Printf("Deactivating %s (worktree + branch + vault state)...\n", taskID)
+		if err := dispatch.Deactivate(cfg, *target); err != nil {
+			return err
+		}
+		fmt.Printf("Done. %s moved to backlog; worktree removed.\n", taskID)
+		return nil
+	}
+
+	repoPath, err := dispatch.RepoPathFor(cfg, *target)
+	if err != nil {
+		return err
+	}
+	branch := dispatch.BranchFor(*target)
+
+	fmt.Printf("Cleaning worktree for %s (branch %s)...\n", taskID, branch)
+	if err := worktree.Remove(repoPath, branch); err != nil {
+		return fmt.Errorf("removing worktree: %w", err)
+	}
+	fmt.Printf("Done. Worktree + branch removed for %s.\n", taskID)
+	return nil
+}
+
+// runWorktreeAdopt re-registers an orphan worktree directory. Useful when a
+// previous aborted run left the directory in place but git's metadata has
+// been lost — worktree.Adopt runs `git worktree repair` to put it back in
+// the registry.
+func runWorktreeAdopt(cmd *cobra.Command, args []string) error {
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+
+	taskID := args[0]
+	tasks, err := vault.ReadAll(cfg.Vault)
+	if err != nil {
+		return fmt.Errorf("reading vault: %w", err)
+	}
+	target := findTask(tasks, taskID)
+	if target == nil {
+		return fmt.Errorf("task %s not found in vault", taskID)
+	}
+
+	repoPath, err := dispatch.RepoPathFor(cfg, *target)
+	if err != nil {
+		return err
+	}
+	branch := dispatch.BranchFor(*target)
+	path := worktree.Path(repoPath, branch)
+
+	fmt.Printf("Adopting worktree %s (branch %s)...\n", path, branch)
+	if err := worktree.Adopt(repoPath, branch); err != nil {
+		return err
+	}
+	fmt.Printf("Done. Registered %s.\n", path)
+	return nil
 }
 
 // findTask returns the first task with a matching ID, or nil.
