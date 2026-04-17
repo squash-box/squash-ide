@@ -55,9 +55,39 @@ var terminals = []terminal{
 //     (ptyxis → gnome-terminal → x-terminal-emulator), preserving T-007 behavior.
 //
 // OS-window spawns are detached via Setpgid so they survive if the parent exits.
-// TaskBorderFormat returns the tmux pane-border-format string for a task pane.
+// TaskBorderFormat returns the tmux pane-border-format string for a task pane
+// with the default "working" state.
 func TaskBorderFormat(taskID, title, project string) string {
-	return taskBorderFormat(taskID, title, project)
+	return TaskBorderFormatWithState(taskID, title, project, "working")
+}
+
+// TaskBorderFormatWithState returns the tmux pane-border-format string for a
+// task pane with the badge color matching the given state.
+func TaskBorderFormatWithState(taskID, title, project, state string) string {
+	if len(title) > 30 {
+		title = title[:27] + "..."
+	}
+
+	var badge, bg string
+	switch state {
+	case "idle":
+		badge = "○ IDLE"
+		bg = "colour214"
+	case "input_required":
+		badge = "⚠ INPUT REQUIRED"
+		bg = "colour204"
+	case "testing":
+		badge = "⧖ TESTING"
+		bg = "colour39"
+	default: // working
+		badge = "● WORKING"
+		bg = "colour78"
+	}
+
+	return fmt.Sprintf(
+		" #[bg=%s,fg=colour235,bold] %s #[default]  #[bold]%s#[default]  %s#[align=right,fg=colour243]%s ",
+		bg, badge, taskID, title, project,
+	)
 }
 
 func SpawnWith(cfg config.Config, vars map[string]string) error {
@@ -116,7 +146,7 @@ func runTmux(t config.Tmux, cwd, execCmd, taskID, title, project string) error {
 		_ = tmux.SetPaneTask(newPane, taskID)
 		_ = tmux.SetPaneOption(newPane, "@squash-title", title)
 		_ = tmux.SetPaneOption(newPane, "@squash-project", project)
-		_ = tmux.SetPaneBorderFormat(newPane, taskBorderFormat(taskID, title, project))
+		_ = tmux.SetPaneBorderFormat(newPane, TaskBorderFormatWithState(taskID, title, project, "working"))
 	}
 
 	// Pin TUI + distribute remaining space equally among task panes.
@@ -128,17 +158,6 @@ func runTmux(t config.Tmux, cwd, execCmd, taskID, title, project string) error {
 	return nil
 }
 
-// taskBorderFormat returns the tmux pane-border-format string for a task
-// pane: green WORKING badge, task ID, title, right-aligned project.
-func taskBorderFormat(taskID, title, project string) string {
-	if len(title) > 30 {
-		title = title[:27] + "..."
-	}
-	return fmt.Sprintf(
-		" #[bg=colour78,fg=colour235,bold] ● WORKING #[default]  #[bold]%s#[default]  %s#[align=right,fg=colour243]%s ",
-		taskID, title, project,
-	)
-}
 
 // killPane closes a pane by ID. Best-effort — errors are returned but the
 // caller decides whether to surface them; in the rejection-cleanup path we

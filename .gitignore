@@ -37,3 +37,6 @@ go.work.sum
 
 # Dev-built binary dropped at repo root by `go build`
 /squash-ide
+
+# MCP config generated per-worktree by dispatch
+.mcp.json

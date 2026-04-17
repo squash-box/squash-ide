@@ -19,6 +19,10 @@ BINARY   := squash-ide
 CMD_PKG  := ./cmd/squash-ide
 BIN_OUT  := bin/$(BINARY)
 
+MCP_BINARY := squash-ide-mcp
+MCP_CMD    := ./cmd/squash-ide-mcp
+MCP_OUT    := bin/$(MCP_BINARY)
+
 # Resolve VERSION from the closest git tag; fall back to "dev" when not in a
 # tagged state. Callers can override on the command line.
 VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
@@ -29,27 +33,35 @@ GOFLAGS  ?=
 PREFIX   ?= $(HOME)/.local
 BIN_DIR  ?= $(PREFIX)/bin
 
-.PHONY: build install test vet fmt clean dist release help
+.PHONY: build build-ide build-mcp install test vet fmt clean dist release help
 
 help:
 	@echo "targets:"
-	@echo "  build     compile into $(BIN_OUT) (VERSION=$(VERSION))"
-	@echo "  install   copy binary to $(BIN_DIR)/$(BINARY)"
+	@echo "  build     compile $(BIN_OUT) and $(MCP_OUT) (VERSION=$(VERSION))"
+	@echo "  install   copy binaries to $(BIN_DIR)"
 	@echo "  test      run go test ./..."
 	@echo "  vet       run go vet ./..."
 	@echo "  fmt       gofmt -w ."
 	@echo "  clean     remove ./bin and ./dist"
 	@echo "  dist      build a tarball at ./dist/$(BINARY)-$(VERSION).tar.gz"
 
-build:
+build: build-ide build-mcp
+
+build-ide:
 	@mkdir -p bin
 	CGO_ENABLED=0 go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN_OUT) $(CMD_PKG)
 	@echo "built $(BIN_OUT) ($(VERSION))"
 
+build-mcp:
+	@mkdir -p bin
+	CGO_ENABLED=0 go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(MCP_OUT) $(MCP_CMD)
+	@echo "built $(MCP_OUT) ($(VERSION))"
+
 install: build
 	@mkdir -p $(BIN_DIR)
 	install -m 0755 $(BIN_OUT) $(BIN_DIR)/$(BINARY)
-	@echo "installed $(BIN_DIR)/$(BINARY)"
+	install -m 0755 $(MCP_OUT) $(BIN_DIR)/$(MCP_BINARY)
+	@echo "installed $(BIN_DIR)/$(BINARY) and $(BIN_DIR)/$(MCP_BINARY)"
 	@echo "ensure $(BIN_DIR) is on your PATH."
 
 test:

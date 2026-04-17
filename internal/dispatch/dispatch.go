@@ -1,12 +1,16 @@
 package dispatch
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/squashbox/squash-ide/internal/config"
 	"github.com/squashbox/squash-ide/internal/slug"
 	"github.com/squashbox/squash-ide/internal/spawner"
+	"github.com/squashbox/squash-ide/internal/status"
 	"github.com/squashbox/squash-ide/internal/task"
 	"github.com/squashbox/squash-ide/internal/taskops"
 	"github.com/squashbox/squash-ide/internal/tmux"
@@ -66,6 +70,11 @@ func Run(cfg config.Config, t task.Task) (Result, error) {
 		return Result{}, fmt.Errorf("creating worktree: %w", err)
 	}
 
+	// Write MCP config so the spawned Claude session can report status.
+	if err := writeMCPConfig(worktreePath, t.ID); err != nil {
+		return Result{}, fmt.Errorf("writing MCP config: %w", err)
+	}
+
 	// Move task to active
 	if _, err := taskops.MoveToActive(vaultRoot, t); err != nil {
 		return Result{}, fmt.Errorf("moving task to active: %w", err)
@@ -114,6 +123,9 @@ func Complete(cfg config.Config, t task.Task) error {
 	}
 
 	branch := BranchFor(t)
+
+	// Clean up the MCP status file.
+	_ = status.Remove(t.ID)
 
 	// Kill the task's tmux pane if running.
 	if cfg.Tmux.Enabled && tmux.InSession() {
@@ -187,6 +199,9 @@ func Deactivate(cfg config.Config, t task.Task) error {
 
 	branch := BranchFor(t)
 
+	// Clean up the MCP status file.
+	_ = status.Remove(t.ID)
+
 	// Kill the task's tmux pane if running. Best-effort — the task may
 	// not have a pane (e.g. spawned in OS-window mode or leftover from
 	// a previous session).
@@ -234,6 +249,36 @@ func WorktreePathFor(cfg config.Config, t task.Task) (string, error) {
 		return "", err
 	}
 	return worktree.Path(repoPath, BranchFor(t)), nil
+}
+
+// writeMCPConfig writes a .mcp.json file into the worktree so the spawned
+// Claude Code session discovers the squash-ide MCP server and can report
+// status via the squash_status tool.
+func writeMCPConfig(worktreePath, taskID string) error {
+	selfPath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolving executable path: %w", err)
+	}
+	mcpBin := filepath.Join(filepath.Dir(selfPath), "squash-ide-mcp")
+
+	cfg := map[string]any{
+		"mcpServers": map[string]any{
+			"squash-ide": map[string]any{
+				"type":    "stdio",
+				"command": mcpBin,
+				"args":    []string{},
+				"env": map[string]string{
+					"SQUASH_TASK_ID": taskID,
+				},
+			},
+		},
+	}
+
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(worktreePath, ".mcp.json"), append(data, '\n'), 0644)
 }
 
 // resolveRepo returns the absolute repo path for a task: the task's repo

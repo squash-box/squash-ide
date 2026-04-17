@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -10,6 +11,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/squashbox/squash-ide/internal/config"
 	"github.com/squashbox/squash-ide/internal/dispatch"
+	"github.com/squashbox/squash-ide/internal/spawner"
+	"github.com/squashbox/squash-ide/internal/status"
 	"github.com/squashbox/squash-ide/internal/task"
 	"github.com/squashbox/squash-ide/internal/tmux"
 	"github.com/squashbox/squash-ide/internal/vault"
@@ -70,6 +73,9 @@ type Model struct {
 	needsRespawn      bool              // true until the first task load triggers respawn
 	RespawnFunc       func([]task.Task) // called once after first load to respawn active panes
 
+	// MCP status polling
+	subStatuses map[string]status.File // keyed by task ID
+
 	// Dispatch / cleanup state
 	confirming   *task.Task // non-nil when spawn confirmation dialog is showing
 	completing   *task.Task // non-nil when complete confirmation dialog is showing
@@ -90,9 +96,9 @@ func New(cfg config.Config) Model {
 	}
 }
 
-// Init loads tasks from the vault.
+// Init loads tasks from the vault and starts the status polling ticker.
 func (m Model) Init() tea.Cmd {
-	return m.loadTasks
+	return tea.Batch(m.loadTasks, m.tickStatus())
 }
 
 type tasksLoadedMsg struct {
@@ -121,9 +127,20 @@ type deactivateDoneMsg struct {
 	taskID string
 }
 
+type statusTickMsg struct {
+	statuses map[string]status.File
+}
+
 func (m Model) loadTasks() tea.Msg {
 	tasks, err := vault.ReadAll(m.vaultPath)
 	return tasksLoadedMsg{tasks: tasks, err: err}
+}
+
+func (m Model) tickStatus() tea.Cmd {
+	return tea.Tick(1*time.Second, func(t time.Time) tea.Msg {
+		statuses, _ := status.ReadAll()
+		return statusTickMsg{statuses: statuses}
+	})
 }
 
 func (m Model) runDispatch(t task.Task) tea.Cmd {
@@ -242,6 +259,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// state may have changed. This also lets the "too narrow" overlay
 		// trigger with the correct active-task count.
 		return m, m.loadTasks
+
+	case statusTickMsg:
+		old := m.subStatuses
+		m.subStatuses = msg.statuses
+
+		// Update tmux pane-border-format for any task whose state changed.
+		if tmux.InSession() {
+			tuiPane := tmux.CurrentPaneID()
+			for _, t := range m.allTasks {
+				if t.Status != "active" {
+					continue
+				}
+				newSub, ok := msg.statuses[t.ID]
+				if !ok {
+					continue
+				}
+				oldState := ""
+				if o, exists := old[t.ID]; exists {
+					oldState = o.State
+				}
+				if newSub.State != oldState {
+					if pane, err := tmux.FindPaneByTask(tuiPane, t.ID); err == nil && pane != "" {
+						_ = tmux.SetPaneBorderFormat(pane,
+							spawner.TaskBorderFormatWithState(t.ID, t.Title, t.Project, newSub.State))
+					}
+				}
+			}
+		}
+		return m, m.tickStatus()
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -842,7 +888,11 @@ func (m Model) renderCardList(width, height int) string {
 		}
 
 		selected := i == m.cursor
-		card := renderCard(item.task, selected, width)
+		var sub *status.File
+		if s, ok := m.subStatuses[item.task.ID]; ok {
+			sub = &s
+		}
+		card := renderCard(item.task, selected, width, sub)
 
 		if selected {
 			cursorStart = len(lines)
