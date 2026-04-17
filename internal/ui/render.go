@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/squashbox/squash-ide/internal/status"
 	"github.com/squashbox/squash-ide/internal/task"
 )
 
@@ -27,16 +28,20 @@ func typeEmoji(typ string) string {
 }
 
 // activeBadge returns the styled status badge shown above the title row for
-// an active task. We don't yet track sub-states (working / idle / needs
-// input) on the Task struct — every active task is rendered as WORKING for
-// now. The plumbing is shaped so a future Task.SubStatus can swap in here.
-func activeBadge(t task.Task) string {
-	state := "WORKING"
+// an active task. When sub is non-nil the badge reflects the real runtime
+// state reported by the MCP server; otherwise it falls back to WORKING.
+func activeBadge(t task.Task, sub *status.File) string {
+	state := "working"
+	if sub != nil {
+		state = sub.State
+	}
 	switch state {
-	case "IDLE":
+	case "idle":
 		return badgeIdleStyle.Render("○ IDLE")
-	case "NEEDS INPUT":
-		return badgeNeedsStyle.Render("⚠ NEEDS INPUT")
+	case "input_required":
+		return badgeNeedsStyle.Render("⚠ INPUT REQUIRED")
+	case "testing":
+		return badgeTestingStyle.Render("⧖ TESTING")
 	default:
 		return badgeWorkingStyle.Render("● WORKING")
 	}
@@ -96,7 +101,7 @@ func renderPlaceholder(msg string) string {
 //
 // When selected, each line gets a left accent bar instead of the usual
 // left padding, so the highlight reads as a vertical stripe down the card.
-func renderCard(t task.Task, selected bool, width int) []string {
+func renderCard(t task.Task, selected bool, width int, sub *status.File) []string {
 	leftPad := "   "
 	if selected {
 		leftPad = " " + cursorBarStyle.Render("▍") + " "
@@ -112,7 +117,7 @@ func renderCard(t task.Task, selected bool, width int) []string {
 
 	// L1: badge (active only).
 	if t.Status == "active" {
-		lines = append(lines, leftPad+activeBadge(t))
+		lines = append(lines, leftPad+activeBadge(t, sub))
 	}
 
 	// L2: emoji + #id + title.

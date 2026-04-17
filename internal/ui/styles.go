@@ -13,6 +13,7 @@ var (
 	colorWorking = lipgloss.Color("78")  // green badge bg
 	colorIdle    = lipgloss.Color("214") // amber badge bg
 	colorNeeds   = lipgloss.Color("204") // pink badge bg
+	colorTesting = lipgloss.Color("39")  // cyan badge bg
 	colorBadgeFg = lipgloss.Color("235") // dark text on light badge bg
 	colorOnDark  = lipgloss.Color("229") // light text on dark bg
 )
@@ -67,6 +68,12 @@ var (
 			Foreground(colorBadgeFg).
 			Bold(true).
 			Padding(0, 1)
+
+	badgeTestingStyle = lipgloss.NewStyle().
+				Background(colorTesting).
+				Foreground(colorBadgeFg).
+				Bold(true).
+				Padding(0, 1)
 )
 
 // --- Task card --------------------------------------------------------------
