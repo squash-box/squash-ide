@@ -7,9 +7,11 @@ import (
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/squashbox/squash-ide/internal/config"
 	"github.com/squashbox/squash-ide/internal/dispatch"
 	"github.com/squashbox/squash-ide/internal/task"
+	"github.com/squashbox/squash-ide/internal/tmux"
 	"github.com/squashbox/squash-ide/internal/vault"
 )
 
@@ -63,6 +65,11 @@ type Model struct {
 
 	err error
 
+	resetCursorOnLoad bool // scroll to top after next tasksLoadedMsg
+	tooNarrow         bool // true when zoomed due to narrow terminal
+	needsRespawn      bool              // true until the first task load triggers respawn
+	RespawnFunc       func([]task.Task) // called once after first load to respawn active panes
+
 	// Dispatch / cleanup state
 	confirming   *task.Task // non-nil when spawn confirmation dialog is showing
 	completing   *task.Task // non-nil when complete confirmation dialog is showing
@@ -77,8 +84,9 @@ type Model struct {
 // New creates a new Model from the resolved config.
 func New(cfg config.Config) Model {
 	return Model{
-		cfg:       cfg,
-		vaultPath: cfg.Vault,
+		cfg:          cfg,
+		vaultPath:    cfg.Vault,
+		needsRespawn: true,
 	}
 }
 
@@ -169,6 +177,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.view == detailView {
 			m.updateDetailContent()
 		}
+		// Synchronous "too narrow" check — zoom/unzoom the TUI pane to
+		// show a full-screen overlay when the terminal can't fit all panes.
+		if tmux.InSession() {
+			m.checkTooNarrow()
+		}
 		return m, nil
 
 	case tasksLoadedMsg:
@@ -179,19 +192,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.allTasks = msg.tasks
 		m.buildItems()
 		m.applyFilter()
+		if m.resetCursorOnLoad {
+			m.cursor = 0
+			m.resetCursorOnLoad = false
+		}
 		m.clampCursor()
-		return m, nil
+		// On the first load, respawn tmux panes for active tasks (or
+		// create the placeholder). Done here rather than before the TUI
+		// starts so the session is fully attached and sized.
+		if m.needsRespawn && m.RespawnFunc != nil {
+			m.needsRespawn = false
+			m.RespawnFunc(m.allTasks)
+		}
+		return m, tea.ClearScreen
 
 	case dispatchDoneMsg:
 		m.dispatching = false
 		m.statusMsg = fmt.Sprintf("spawned %s", msg.taskID)
 		m.statusIsErr = false
+		m.resetCursorOnLoad = true
 		return m, m.loadTasks
 
 	case completeDoneMsg:
 		m.dispatching = false
 		m.statusMsg = fmt.Sprintf("completed %s", msg.taskID)
 		m.statusIsErr = false
+		m.resetCursorOnLoad = true
 		return m, m.loadTasks
 
 	case blockDoneMsg:
@@ -204,13 +230,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.dispatching = false
 		m.statusMsg = fmt.Sprintf("deactivated %s → backlog", msg.taskID)
 		m.statusIsErr = false
+		m.resetCursorOnLoad = true
 		return m, m.loadTasks
 
 	case dispatchErrMsg:
 		m.dispatching = false
 		m.statusMsg = msg.err.Error()
 		m.statusIsErr = true
-		return m, nil
+		// Reload tasks — the dispatch may have partially succeeded (e.g.
+		// task moved to active before the spawn failed), so the vault
+		// state may have changed. This also lets the "too narrow" overlay
+		// trigger with the correct active-task count.
+		return m, m.loadTasks
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -616,9 +647,64 @@ func (m *Model) updateDetailContent() {
 }
 
 // View renders the UI.
+// checkTooNarrow queries the tmux window width and zooms/unzooms the TUI
+// pane to show a "too narrow" overlay. Called synchronously from the
+// WindowSizeMsg handler (~5ms tmux roundtrip, no async race).
+func (m *Model) checkTooNarrow() {
+	pane := tmux.CurrentPaneID()
+	if pane == "" {
+		return
+	}
+	ww, err := tmux.WindowWidth(pane)
+	if err != nil || ww == 0 {
+		return
+	}
+	activeCount := 0
+	for _, t := range m.allTasks {
+		if t.Status == "active" {
+			activeCount++
+		}
+	}
+	if activeCount == 0 {
+		if m.tooNarrow {
+			m.tooNarrow = false
+			tmux.ToggleZoom(pane)
+		}
+		return
+	}
+	needed := m.cfg.Tmux.TUIWidth + activeCount*(m.cfg.Tmux.PaneWidth+1)
+	if ww < needed && !m.tooNarrow {
+		m.tooNarrow = true
+		tmux.ToggleZoom(pane)
+	} else if ww >= needed && m.tooNarrow {
+		m.tooNarrow = false
+		tmux.ToggleZoom(pane)
+	}
+}
+
 func (m Model) View() string {
 	if m.err != nil {
 		return fmt.Sprintf("\n  Error: %v\n\n  Press q to quit.\n", m.err)
+	}
+
+	if m.tooNarrow {
+		activeCount := 0
+		for _, t := range m.allTasks {
+			if t.Status == "active" {
+				activeCount++
+			}
+		}
+		needed := m.cfg.Tmux.TUIWidth + activeCount*(m.cfg.Tmux.PaneWidth+1)
+		msg := fmt.Sprintf(
+			"Terminal too narrow\n\nNeeded: %d cols\n\nWiden the terminal or\ndeactivate a task with d",
+			needed,
+		)
+		styled := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("204")).
+			Bold(true).
+			Align(lipgloss.Center).
+			Render(msg)
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, styled)
 	}
 
 	if m.view == detailView {
@@ -626,6 +712,7 @@ func (m Model) View() string {
 	}
 	return m.listViewRender()
 }
+
 
 func (m Model) listViewRender() string {
 	// The task list is always rendered at a fixed width (cfg.Tmux.TUIWidth,
@@ -650,8 +737,6 @@ func (m Model) listViewRender() string {
 	counts := m.statusCounts()
 	b.WriteString(renderTopBar(width, "squash-ide", "", counts))
 	b.WriteString("\n")
-	b.WriteString(renderDivider(width))
-	b.WriteString("\n")
 
 	if len(m.allTasks) == 0 {
 		b.WriteString(emptyStyle.Render("No tasks found in vault."))
@@ -664,7 +749,7 @@ func (m Model) listViewRender() string {
 	}
 
 	// Reserve rows: top bar + divider + (filter row?) + status bar + help.
-	chrome := 4
+	chrome := 3 // top bar + status bar + help line
 	if m.filterActive || m.filter != "" {
 		chrome++
 	}

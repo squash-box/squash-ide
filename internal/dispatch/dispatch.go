@@ -37,6 +37,29 @@ func Run(cfg config.Config, t task.Task) (Result, error) {
 
 	branch := BranchFor(t)
 
+	// Pre-flight: verify the window has room for another pane before
+	// touching the vault or creating a worktree. Avoids orphaned active
+	// tasks when the terminal is too narrow.
+	if cfg.Tmux.Enabled && tmux.InSession() {
+		tuiPane := tmux.CurrentPaneID()
+		totalCols, err := tmux.WindowWidth(tuiPane)
+		if err == nil {
+			// Count existing task panes (not placeholder/TUI) + 1 for the new one.
+			existing, _ := tmux.CountPanesByOption(tuiPane, "@squash-task")
+			n := existing + 1
+			floor := cfg.Tmux.MinPaneWidth
+			if cfg.Tmux.PaneWidth > floor {
+				floor = cfg.Tmux.PaneWidth
+			}
+			avail := totalCols - cfg.Tmux.TUIWidth - n
+			if avail < n*floor {
+				return Result{}, fmt.Errorf(
+					"terminal too narrow for another pane (%d cols, need %d)",
+					totalCols, cfg.Tmux.TUIWidth+n*(floor+1))
+			}
+		}
+	}
+
 	// Create worktree
 	worktreePath, err := worktree.Create(repoPath, branch)
 	if err != nil {
@@ -91,6 +114,21 @@ func Complete(cfg config.Config, t task.Task) error {
 	}
 
 	branch := BranchFor(t)
+
+	// Kill the task's tmux pane if running.
+	if cfg.Tmux.Enabled && tmux.InSession() {
+		tuiPane := tmux.CurrentPaneID()
+		if pane, err := tmux.FindPaneByTask(tuiPane, t.ID); err == nil && pane != "" {
+			_ = tmux.KillPane(pane)
+		}
+		if remaining, _ := tmux.CountPanesByOption(tuiPane, "@squash-task"); remaining == 0 {
+			if existing, _ := tmux.FindPaneByRole(tuiPane, tmux.RolePlaceholder); existing == "" {
+				_ = tmux.SpawnPlaceholder(tuiPane, cfg.Tmux.TUIWidth)
+			}
+		} else {
+			_, _ = tmux.ReTile(tuiPane, cfg.Tmux.TUIWidth, cfg.Tmux.PaneWidth, cfg.Tmux.MinPaneWidth)
+		}
+	}
 
 	if err := worktree.Remove(repoPath, branch); err != nil {
 		return fmt.Errorf("removing worktree: %w", err)
@@ -149,18 +187,21 @@ func Deactivate(cfg config.Config, t task.Task) error {
 
 	branch := BranchFor(t)
 
-	// Kill the task's tmux panes (header + content) if running. Best-effort
-	// — the task may not have a pane (e.g. spawned in OS-window mode), and
-	// lookup failures shouldn't block the deactivation.
+	// Kill the task's tmux pane if running. Best-effort — the task may
+	// not have a pane (e.g. spawned in OS-window mode or leftover from
+	// a previous session).
 	if cfg.Tmux.Enabled && tmux.InSession() {
 		tuiPane := tmux.CurrentPaneID()
-		// Kill header pane first (tagged @squash-header=<taskID>)
-		if hdr, err := tmux.FindPaneByOption(tuiPane, "@squash-header", t.ID); err == nil && hdr != "" {
-			_ = tmux.KillPane(hdr)
-		}
-		// Kill content pane (tagged @squash-task=<taskID>)
 		if pane, err := tmux.FindPaneByTask(tuiPane, t.ID); err == nil && pane != "" {
 			_ = tmux.KillPane(pane)
+		}
+		// Restore placeholder or redistribute space among remaining panes.
+		if remaining, _ := tmux.CountPanesByOption(tuiPane, "@squash-task"); remaining == 0 {
+			if existing, _ := tmux.FindPaneByRole(tuiPane, tmux.RolePlaceholder); existing == "" {
+				_ = tmux.SpawnPlaceholder(tuiPane, cfg.Tmux.TUIWidth)
+			}
+		} else {
+			_, _ = tmux.ReTile(tuiPane, cfg.Tmux.TUIWidth, cfg.Tmux.PaneWidth, cfg.Tmux.MinPaneWidth)
 		}
 	}
 
