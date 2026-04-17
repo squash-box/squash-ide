@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/squashbox/squash-ide/internal/config"
 	"github.com/squashbox/squash-ide/internal/dispatch"
+	"github.com/squashbox/squash-ide/internal/spawner"
 	"github.com/squashbox/squash-ide/internal/task"
 	"github.com/squashbox/squash-ide/internal/tmux"
 	"github.com/squashbox/squash-ide/internal/ui"
@@ -93,7 +94,14 @@ func main() {
 		RunE:   runPlaceholder,
 	}
 
-	rootCmd.AddCommand(listCmd, spawnCmd, completeCmd, blockCmd, configCmd, placeholderCmd)
+	retileCmd := &cobra.Command{
+		Use:    "retile",
+		Short:  "Internal: re-pin TUI width and equalize task pane widths",
+		Hidden: true,
+		RunE:   runRetile,
+	}
+
+	rootCmd.AddCommand(listCmd, spawnCmd, completeCmd, blockCmd, configCmd, placeholderCmd, retileCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -128,11 +136,10 @@ func runTUI(cmd *cobra.Command, args []string) error {
 			fmt.Fprintln(os.Stderr, "warning: tmux not on PATH; falling back to OS-window spawn (use --no-tmux to silence)")
 		} else {
 			inner := buildSelfInvocation()
-			placeholder := buildPlaceholderInvocation()
 			// Replaces this process on success. Only returns on exec
 			// failure (or bootstrap setup failure before the exec).
 			if err := tmux.EnsureSessionWithPlaceholder(
-				cfg.Tmux.SessionName, inner, placeholder, cfg.Tmux.TUIWidth,
+				cfg.Tmux.SessionName, inner, cfg.Tmux.TUIWidth,
 			); err != nil {
 				return fmt.Errorf("bootstrapping tmux session: %w", err)
 			}
@@ -140,6 +147,11 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	}
 
 	m := ui.New(cfg)
+	if cfg.Tmux.Enabled && tmux.InSession() {
+		m.RespawnFunc = func(tasks []task.Task) {
+			respawnActive(cfg, tasks)
+		}
+	}
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	_, err = p.Run()
 
@@ -352,6 +364,25 @@ func runConfig(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// runRetile re-pins the TUI and equalizes task pane widths. Called by the
+// tmux client-resized hook so we avoid shell escaping issues.
+func runRetile(cmd *cobra.Command, args []string) error {
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	if !tmux.InSession() {
+		return nil
+	}
+	// run-shell doesn't set TMUX_PANE, so use the session name as target.
+	tuiPane, err := tmux.FindPaneByRole(cfg.Tmux.SessionName, tmux.RoleTUI)
+	if err != nil || tuiPane == "" {
+		return nil // no TUI pane found — nothing to retile
+	}
+	_, _ = tmux.ReTile(tuiPane, cfg.Tmux.TUIWidth, cfg.Tmux.PaneWidth, cfg.Tmux.MinPaneWidth)
+	return nil
+}
+
 // runPlaceholder renders the right-pane placeholder screen. It's invoked
 // by the tmux bootstrap in fresh sessions — see tmux.EnsureSession. Uses
 // the resolved tmux config so the slot count matches what the spawner
@@ -362,6 +393,73 @@ func runPlaceholder(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	return ui.RunPlaceholder(cfg.Tmux.TUIWidth, cfg.Tmux.MinPaneWidth)
+}
+
+// respawnActive creates tmux panes for tasks that are already in "active"
+// status but don't have a corresponding tmux pane (leftover from a previous
+// session). No vault changes — just pane creation.
+func respawnActive(cfg config.Config, tasks []task.Task) {
+	tuiPane := tmux.CurrentPaneID()
+	if tuiPane == "" {
+		return
+	}
+
+	var active []task.Task
+	for _, t := range tasks {
+		if t.Status == "active" {
+			active = append(active, t)
+		}
+	}
+	if len(active) == 0 {
+		// No active tasks — create the placeholder and pin TUI width.
+		_ = tmux.SpawnPlaceholder(tuiPane, cfg.Tmux.TUIWidth)
+		return
+	}
+
+	spawned := 0
+	for _, t := range active {
+		// Skip if a pane already exists for this task.
+		if existing, err := tmux.FindPaneByTask(tuiPane, t.ID); err == nil && existing != "" {
+			continue
+		}
+
+		cwd, err := dispatch.WorktreePathFor(cfg, t)
+		if err != nil {
+			cwd = ""
+		}
+
+		vars := map[string]string{
+			"task_id": t.ID, "title": t.Title, "project": t.Project,
+			"cwd": cwd, "worktree": cwd,
+		}
+		spawnArgs := config.ExpandAll(cfg.Spawn.Args, vars)
+		execCmd := config.BuildExec(cfg.Spawn.Command, spawnArgs)
+
+		target, err := tmux.RightmostRightPaneID(tuiPane)
+		if err != nil || target == "" {
+			target = tuiPane
+		}
+
+		newPane, err := tmux.SplitRight(target, cwd, execCmd)
+		if err != nil {
+			continue
+		}
+
+		_ = tmux.SetPaneTask(newPane, t.ID)
+		_ = tmux.SetPaneOption(newPane, "@squash-title", t.Title)
+		_ = tmux.SetPaneOption(newPane, "@squash-project", t.Project)
+		_ = tmux.SetPaneBorderFormat(newPane, spawner.TaskBorderFormat(t.ID, t.Title, t.Project))
+		spawned++
+	}
+
+	if spawned > 0 {
+		if _, err := tmux.ReTile(tuiPane, cfg.Tmux.TUIWidth, cfg.Tmux.PaneWidth, cfg.Tmux.MinPaneWidth); err != nil {
+			if f, e := os.OpenFile("/tmp/squash-retile.log", os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644); e == nil {
+				fmt.Fprintf(f, "retile failed: %v\n", err)
+				f.Close()
+			}
+		}
+	}
 }
 
 // findTask returns the first task with a matching ID, or nil.

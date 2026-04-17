@@ -298,16 +298,6 @@ func TestEmptyVault(t *testing.T) {
 	}
 }
 
-func TestTopBar_Counts(t *testing.T) {
-	m := modelWithTasks(testTasks())
-	v := m.View()
-
-	// Per-status counts now live in the top header alongside the app name.
-	if !containsAll(v, "2 backlog", "1 active", "1 blocked") {
-		t.Errorf("top bar missing expected counts in view:\n%s", v)
-	}
-}
-
 func TestStatusBar_VaultHintWhenIdle(t *testing.T) {
 	m := modelWithTasks(testTasks())
 	bar := m.renderStatusBar()

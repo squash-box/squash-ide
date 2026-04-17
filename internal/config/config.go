@@ -48,6 +48,7 @@ type Tmux struct {
 	Enabled      bool   `yaml:"enabled"`
 	SessionName  string `yaml:"session_name"`
 	TUIWidth     int    `yaml:"tui_width"`
+	PaneWidth    int    `yaml:"pane_width"`
 	MinPaneWidth int    `yaml:"min_pane_width"`
 }
 
@@ -79,6 +80,7 @@ type Overrides struct {
 	// absence (false) is a no-op (config/env still wins).
 	NoTmux       bool
 	TUIWidth     int // 0 => not provided
+	PaneWidth    int // 0 => not provided
 	MinPaneWidth int // 0 => not provided
 
 	// ConfigPath, when non-empty, overrides the default ~/.config/squash-ide/config.yaml
@@ -104,6 +106,7 @@ func Defaults() Config {
 			Enabled:      true,
 			SessionName:  "squash-ide",
 			TUIWidth:     60,
+			PaneWidth:    80,
 			MinPaneWidth: 80,
 		},
 		Sources: map[string]Source{
@@ -115,6 +118,7 @@ func Defaults() Config {
 			"tmux.enabled":        SourceDefault,
 			"tmux.session_name":   SourceDefault,
 			"tmux.tui_width":      SourceDefault,
+			"tmux.pane_width":     SourceDefault,
 			"tmux.min_pane_width": SourceDefault,
 		},
 	}
@@ -161,6 +165,7 @@ type fileTmux struct {
 	Enabled      *bool  `yaml:"enabled"`
 	SessionName  string `yaml:"session_name"`
 	TUIWidth     int    `yaml:"tui_width"`
+	PaneWidth    int    `yaml:"pane_width"`
 	MinPaneWidth int    `yaml:"min_pane_width"`
 }
 
@@ -223,6 +228,10 @@ func applyFile(cfg *Config, path string) error {
 			cfg.Tmux.TUIWidth = fc.Tmux.TUIWidth
 			cfg.Sources["tmux.tui_width"] = SourceFile
 		}
+		if fc.Tmux.PaneWidth > 0 {
+			cfg.Tmux.PaneWidth = fc.Tmux.PaneWidth
+			cfg.Sources["tmux.pane_width"] = SourceFile
+		}
 		if fc.Tmux.MinPaneWidth > 0 {
 			cfg.Tmux.MinPaneWidth = fc.Tmux.MinPaneWidth
 			cfg.Sources["tmux.min_pane_width"] = SourceFile
@@ -271,6 +280,10 @@ func applyOverrides(cfg *Config, ov Overrides) {
 		cfg.Tmux.TUIWidth = ov.TUIWidth
 		cfg.Sources["tmux.tui_width"] = SourceFlag
 	}
+	if ov.PaneWidth > 0 {
+		cfg.Tmux.PaneWidth = ov.PaneWidth
+		cfg.Sources["tmux.pane_width"] = SourceFlag
+	}
 	if ov.MinPaneWidth > 0 {
 		cfg.Tmux.MinPaneWidth = ov.MinPaneWidth
 		cfg.Sources["tmux.min_pane_width"] = SourceFlag
@@ -315,6 +328,7 @@ func (c Config) Format() string {
 	fmt.Fprintf(&b, "tmux.enabled: %t (from %s)\n", c.Tmux.Enabled, source(c, "tmux.enabled"))
 	fmt.Fprintf(&b, "tmux.session_name: %s (from %s)\n", c.Tmux.SessionName, source(c, "tmux.session_name"))
 	fmt.Fprintf(&b, "tmux.tui_width: %d (from %s)\n", c.Tmux.TUIWidth, source(c, "tmux.tui_width"))
+	fmt.Fprintf(&b, "tmux.pane_width: %d (from %s)\n", c.Tmux.PaneWidth, source(c, "tmux.pane_width"))
 	fmt.Fprintf(&b, "tmux.min_pane_width: %d (from %s)\n", c.Tmux.MinPaneWidth, source(c, "tmux.min_pane_width"))
 	return b.String()
 }
