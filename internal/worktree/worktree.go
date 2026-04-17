@@ -290,4 +290,3 @@ func hasGitReference(dir string) bool {
 	_, err := os.Stat(filepath.Join(dir, ".git"))
 	return err == nil
 }
-
