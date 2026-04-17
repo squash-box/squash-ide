@@ -96,6 +96,17 @@ func Run(cfg config.Config, t task.Task) (Result, error) {
 		return Result{}, fmt.Errorf("writing MCP config: %w", err)
 	}
 
+	// Write Claude Code hook settings so permission dialogs flip the badge
+	// to input_required synchronously — the model-initiated path can't
+	// reach that state because the model turn is paused on the host.
+	selfPath, err := os.Executable()
+	if err != nil {
+		return Result{}, fmt.Errorf("resolving executable path: %w", err)
+	}
+	if err := writeClaudeSettings(worktreePath, t.ID, selfPath); err != nil {
+		return Result{}, fmt.Errorf("writing Claude settings: %w", err)
+	}
+
 	// Move task to active
 	if _, err := taskops.MoveToActive(vaultRoot, t); err != nil {
 		return Result{}, fmt.Errorf("moving task to active: %w", err)

@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 
 	"github.com/squashbox/squash-ide/internal/status"
 )
@@ -132,7 +131,7 @@ func handleRequest(taskID string, req *jsonRPCRequest) *jsonRPCResponse {
 			"tools": []map[string]any{
 				{
 					"name":        "squash_status",
-					"description": "Report your current status to the squash-ide dashboard. Call this when your activity phase changes (starting work, running tests, needing input, going idle).",
+					"description": "Report your current status to the squash-ide dashboard. Call this when your activity phase changes (starting work, running tests, going idle). Note: tool-permission dialogs (e.g. 'Do you want to make this edit?') are handled automatically by Claude Code hooks — you do not need to report input_required for those.",
 					"inputSchema": map[string]any{
 						"type": "object",
 						"properties": map[string]any{
@@ -189,7 +188,7 @@ func handleToolCall(taskID string, req *jsonRPCRequest) *jsonRPCResponse {
 
 	// Fire desktop notification for input_required.
 	if args.State == "input_required" {
-		notifyInputRequired(taskID, args.Message)
+		status.NotifyInputRequired(taskID, args.Message)
 	}
 
 	return success(req.ID, mcpToolResult{
@@ -198,19 +197,6 @@ func handleToolCall(taskID string, req *jsonRPCRequest) *jsonRPCResponse {
 			Text: fmt.Sprintf("Status reported: %s — %s", args.State, args.Message),
 		}},
 	})
-}
-
-// notifyInputRequired sends a desktop notification via notify-send.
-// Best-effort: errors are logged but not propagated.
-func notifyInputRequired(taskID, message string) {
-	cmd := exec.Command("notify-send",
-		"-u", "critical",
-		fmt.Sprintf("squash-ide: %s needs input", taskID),
-		message,
-	)
-	if err := cmd.Start(); err != nil {
-		fmt.Fprintf(os.Stderr, "squash-ide-mcp: notify-send failed: %v\n", err)
-	}
 }
 
 func success(id json.RawMessage, result any) *jsonRPCResponse {

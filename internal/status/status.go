@@ -91,6 +91,16 @@ func ReadAll() (map[string]File, error) {
 	return result, nil
 }
 
+// SetDirForTesting redirects the effective status directory to dir and
+// returns a restore func. Intended for tests in other packages (the in-package
+// tests use the unexported dirRef directly). Calling with an empty dir is a
+// no-op.
+func SetDirForTesting(dir string) (restore func()) {
+	prev := dirRef
+	dirRef = dir
+	return func() { dirRef = prev }
+}
+
 // Remove deletes the status file for a task. It is not an error if the
 // file does not exist.
 func Remove(taskID string) error {

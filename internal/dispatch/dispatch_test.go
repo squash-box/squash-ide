@@ -192,9 +192,13 @@ func TestRun_HappyPath(t *testing.T) {
 		t.Error("log missing T-001")
 	}
 
+	// .mcp.json and .claude/settings.json both written by dispatch.
 	wt := res.WorktreePath
 	if _, err := os.Stat(filepath.Join(wt, ".mcp.json")); err != nil {
 		t.Errorf(".mcp.json missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(wt, ".claude", "settings.json")); err != nil {
+		t.Errorf(".claude/settings.json missing: %v", err)
 	}
 }
 
