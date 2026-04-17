@@ -36,6 +36,12 @@ if [[ -z "$MCP_BIN" ]]; then
   exit 1
 fi
 
+# Find the squash-ide binary (for the hook-path scenario exercised below).
+IDE_BIN="${SCRIPT_DIR}/../bin/squash-ide"
+if [[ ! -x "$IDE_BIN" ]]; then
+  IDE_BIN="$(command -v squash-ide 2>/dev/null || true)"
+fi
+
 # Colours for terminal output.
 C_RESET="\033[0m"
 C_BOLD="\033[1m"
@@ -123,6 +129,17 @@ while true; do
     done
     printf "\r                              \r"
   done
+
+  # T-021: exercise the push-based hook entrypoint once per cycle, proving the
+  # TUI-visible state matches the MCP-driven input_required row above. The
+  # Notification hook Claude Code fires during a permission dialog would call
+  # the same subcommand.
+  if [[ -n "$IDE_BIN" ]]; then
+    banner "$C_PINK" "⚠" "INPUT REQUIRED" "(hook path) simulated Notification event"
+    "$IDE_BIN" status input_required "Permission dialog (hook path)" >/dev/null 2>&1 || true
+    sleep 3
+    "$IDE_BIN" status working "Resumed after consent (hook path)" >/dev/null 2>&1 || true
+  fi
 
   cycle=$((cycle + 1))
 done

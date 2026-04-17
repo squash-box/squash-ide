@@ -164,6 +164,24 @@ squash-ide list
 squash-ide list --status backlog
 ```
 
+### Hooks (Claude Code push-based status)
+
+Alongside `.mcp.json`, dispatch writes a worktree-scoped
+`.claude/settings.json` wiring three Claude Code hooks into the shell-invocable
+`squash-ide status <state> [message]` subcommand:
+
+| Event         | State           | Fires when                                       |
+|---------------|-----------------|--------------------------------------------------|
+| `Notification`| `input_required`| Claude shows a permission dialog / is waiting    |
+| `PostToolUse` | `working`       | A tool call completes (includes granted perms)   |
+| `Stop`        | `idle`          | Claude finishes a turn                           |
+
+The `squash_status` MCP tool is still used by Claude for model-driven
+transitions (`testing`, `idle` after an explicit wind-down). Hooks cover the
+permission-dialog case, where the model turn is paused and can't make a tool
+call. Both paths write the same status file format, so the TUI and
+`notify-send` behaviour are identical.
+
 ### Config
 
 ```bash

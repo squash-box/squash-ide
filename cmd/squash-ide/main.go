@@ -127,7 +127,7 @@ to backlog, updates board/log, tears down the tmux pane).`,
 	}
 	worktreeCmd.AddCommand(worktreeCleanCmd, worktreeAdoptCmd)
 
-	rootCmd.AddCommand(listCmd, spawnCmd, completeCmd, blockCmd, configCmd, worktreeCmd, placeholderCmd, retileCmd)
+	rootCmd.AddCommand(listCmd, spawnCmd, completeCmd, blockCmd, configCmd, worktreeCmd, newStatusCmd(), placeholderCmd, retileCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
