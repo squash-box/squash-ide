@@ -3,11 +3,23 @@ package spawner
 import (
 	"fmt"
 	"os/exec"
-	"syscall"
 
 	"github.com/squashbox/squash-ide/internal/config"
+	runexec "github.com/squashbox/squash-ide/internal/exec"
 	"github.com/squashbox/squash-ide/internal/tmux"
 )
+
+// runner is the process runner used by the configured / auto-detect terminal
+// paths. The tmux split-pane path stays on tmux.* helpers which have their
+// own seam. Swap in tests via SetRunner.
+var runner runexec.Runner = runexec.Default
+
+// SetRunner swaps the runner; returns the previous value for restoration.
+func SetRunner(r runexec.Runner) runexec.Runner {
+	prev := runner
+	runner = r
+	return prev
+}
 
 // terminal describes how to invoke a terminal emulator when auto-detecting.
 type terminal struct {
@@ -158,7 +170,6 @@ func runTmux(t config.Tmux, cwd, execCmd, taskID, title, project string) error {
 	return nil
 }
 
-
 // killPane closes a pane by ID. Best-effort — errors are returned but the
 // caller decides whether to surface them; in the rejection-cleanup path we
 // already have a more interesting error to propagate.
@@ -173,14 +184,12 @@ func killPane(paneID string) error {
 }
 
 func runConfigured(term config.Terminal, vars map[string]string) error {
-	binPath, err := exec.LookPath(term.Command)
+	binPath, err := runner.LookPath(term.Command)
 	if err != nil {
 		return fmt.Errorf("terminal %q not found on PATH: %w", term.Command, err)
 	}
 	args := config.ExpandAll(term.Args, vars)
-	cmd := exec.Command(binPath, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := cmd.Start(); err != nil {
+	if err := runner.Start(binPath, args, true); err != nil {
 		return fmt.Errorf("spawning %s: %w", term.Command, err)
 	}
 	return nil
@@ -188,13 +197,11 @@ func runConfigured(term config.Terminal, vars map[string]string) error {
 
 func runAutoDetect(workdir, execCmd string) error {
 	for _, t := range terminals {
-		binPath, err := exec.LookPath(t.bin)
+		binPath, err := runner.LookPath(t.bin)
 		if err != nil {
 			continue
 		}
-		cmd := exec.Command(binPath, t.args(workdir, execCmd)...)
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		if err := cmd.Start(); err != nil {
+		if err := runner.Start(binPath, t.args(workdir, execCmd), true); err != nil {
 			return fmt.Errorf("spawning %s: %w", t.bin, err)
 		}
 		return nil

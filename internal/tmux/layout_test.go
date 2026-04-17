@@ -8,10 +8,10 @@ import (
 
 func TestTile_HappyPath(t *testing.T) {
 	tests := []struct {
-		name              string
-		totalCols, tuiW   int
-		n, minW           int
-		want              []int
+		name            string
+		totalCols, tuiW int
+		n, minW         int
+		want            []int
 	}{
 		{
 			// Ultrawide example from the task spec: 240 cols, 60 col TUI,
@@ -94,9 +94,9 @@ func TestTile_HappyPath(t *testing.T) {
 
 func TestTile_RejectsWhenBelowMin(t *testing.T) {
 	tests := []struct {
-		name              string
-		totalCols, tuiW   int
-		n, minW           int
+		name            string
+		totalCols, tuiW int
+		n, minW         int
 	}{
 		{
 			// Adding a 4th pane to a barely-fits-3 layout should reject.
