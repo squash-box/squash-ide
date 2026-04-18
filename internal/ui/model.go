@@ -96,6 +96,23 @@ func New(cfg config.Config) Model {
 	}
 }
 
+// NewForTest constructs a Model pre-loaded with tasks and status entries,
+// ready to render without the async Init → loadTasks → tasksLoadedMsg
+// round-trip. Intended for e2e tests that want to assert the rendered view
+// directly; production callers should use New.
+func NewForTest(cfg config.Config, tasks []task.Task, statuses map[string]status.File) Model {
+	m := New(cfg)
+	m.allTasks = tasks
+	m.subStatuses = statuses
+	m.width = 80
+	m.height = 24
+	m.needsRespawn = false
+	m.buildItems()
+	m.applyFilter()
+	m.clampCursor()
+	return m
+}
+
 // Init loads tasks from the vault and starts the status polling ticker.
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(m.loadTasks, m.tickStatus())
@@ -265,25 +282,40 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.subStatuses = msg.statuses
 
 		// Update tmux pane-border-format for any task whose state changed.
+		//
+		// "No entry" on this tick is treated as IDLE — matching activeBadge's
+		// default for a nil sub — so the two consumers agree on what "no
+		// live status report" means. Without the old-present / new-absent
+		// branch, the pane border would silently retain its last-painted
+		// format past the staleness horizon and diverge from the list badge.
 		if tmux.InSession() {
 			tuiPane := tmux.CurrentPaneID()
 			for _, t := range m.allTasks {
 				if t.Status != "active" {
 					continue
 				}
-				newSub, ok := msg.statuses[t.ID]
-				if !ok {
+				newSub, newOK := msg.statuses[t.ID]
+				oldSub, oldOK := old[t.ID]
+				newState := "idle"
+				if newOK {
+					newState = newSub.State
+				}
+				oldState := "idle"
+				if oldOK {
+					oldState = oldSub.State
+				}
+				// Skip when we've never seen an entry for this task (both
+				// old and new absent) — nothing has changed visually and we
+				// don't want to paint "idle" on every tick forever.
+				if !newOK && !oldOK {
 					continue
 				}
-				oldState := ""
-				if o, exists := old[t.ID]; exists {
-					oldState = o.State
+				if newState == oldState {
+					continue
 				}
-				if newSub.State != oldState {
-					if pane, err := tmux.FindPaneByTask(tuiPane, t.ID); err == nil && pane != "" {
-						_ = tmux.SetPaneBorderFormat(pane,
-							spawner.TaskBorderFormatWithState(t.ID, t.Title, t.Project, newSub.State))
-					}
+				if pane, err := tmux.FindPaneByTask(tuiPane, t.ID); err == nil && pane != "" {
+					_ = tmux.SetPaneBorderFormat(pane,
+						spawner.TaskBorderFormatWithState(t.ID, t.Title, t.Project, newState))
 				}
 			}
 		}

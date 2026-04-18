@@ -29,9 +29,13 @@ func typeEmoji(typ string) string {
 
 // activeBadge returns the styled status badge shown above the title row for
 // an active task. When sub is non-nil the badge reflects the real runtime
-// state reported by the MCP server; otherwise it falls back to WORKING.
+// state reported by the MCP server. When sub is nil the task has no live
+// status report (either never written, or aged past status.StaleDuration) —
+// render as IDLE rather than WORKING, since the Stop hook is the
+// authoritative turn-end signal and an absent file means the last signal
+// has aged out rather than flipped back to active work.
 func activeBadge(t task.Task, sub *status.File) string {
-	state := "working"
+	state := "idle"
 	if sub != nil {
 		state = sub.State
 	}
