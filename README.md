@@ -194,6 +194,11 @@ permission-dialog case, where the model turn is paused and can't make a tool
 call. Both paths write the same status file format, so the TUI and
 `notify-send` behaviour are identical.
 
+A task with no live status report — whether the file was never written or
+has aged past the 5-minute staleness horizon — renders as `○ IDLE` in the
+list and on the tmux pane border; the Stop hook is treated as the
+authoritative turn-end signal.
+
 ### Config
 
 ```bash

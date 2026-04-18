@@ -2,11 +2,14 @@ package ui
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/squashbox/squash-ide/internal/config"
+	"github.com/squashbox/squash-ide/internal/status"
 	"github.com/squashbox/squash-ide/internal/task"
+	"github.com/squashbox/squash-ide/internal/tmux"
 )
 
 func testTasks() []task.Task {
@@ -549,6 +552,152 @@ func TestEnterDuringDispatch_ShowsWarning(t *testing.T) {
 	}
 	if updated.statusMsg != "dispatch already in progress" {
 		t.Errorf("expected warning about in-progress dispatch, got %q", updated.statusMsg)
+	}
+}
+
+// --- T-023: tick handler convergence tests ---
+//
+// These guard the symmetry between activeBadge's nil-sub default and the
+// tmux pane-border-format updater. After T-023, both consumers collapse
+// "no live status report" onto IDLE; a regression would re-open the bug
+// where a stale status file left the list badge stuck on WORKING while
+// the pane border stuck on IDLE.
+
+// captureTmuxCalls swaps tmux's runOut with a recorder. It also sets TMUX /
+// TMUX_PANE so tmux.InSession() and tmux.CurrentPaneID() report as if we
+// were inside a session. Returns a pointer to the captured invocations.
+func captureTmuxCalls(t *testing.T) *[][]string {
+	t.Helper()
+	t.Setenv("TMUX", "/tmp/tmux-test")
+	t.Setenv("TMUX_PANE", "%0")
+
+	calls := &[][]string{}
+	prev := tmux.SetRunOutFn(func(name string, args ...string) (string, error) {
+		invocation := append([]string{name}, args...)
+		*calls = append(*calls, invocation)
+		// Pretend every list-panes query returns the tagged pane. The
+		// pane-border updater does a list-panes lookup via FindPaneByTask;
+		// returning "%1 <taskID>" makes it think the pane exists.
+		if len(args) >= 1 && args[0] == "list-panes" {
+			// Last arg is the format string; the second is usually the
+			// task id matcher. Return a plausible line that the caller can
+			// fields-parse.
+			return "%1 T-003\n", nil
+		}
+		return "", nil
+	})
+	t.Cleanup(func() { tmux.SetRunOutFn(prev) })
+	return calls
+}
+
+// countBorderFormatCalls returns how many set-option -p pane-border-format
+// calls appear in the captured list, paired with the rendered format string.
+func countBorderFormatCalls(calls [][]string) []string {
+	var formats []string
+	for _, c := range calls {
+		if len(c) < 2 || c[0] != "tmux" {
+			continue
+		}
+		if c[1] != "set-option" {
+			continue
+		}
+		// Look for "pane-border-format" key and grab the value that follows.
+		for i, a := range c {
+			if a == "pane-border-format" && i+1 < len(c) {
+				formats = append(formats, c[i+1])
+			}
+		}
+	}
+	return formats
+}
+
+// TestTick_OldPresentNewAbsent_PaintsIdle exercises the stale-crossing case
+// T-023 is about: a task had an entry on the previous tick, the status file
+// aged out (ReadAll filters it) and the next tick has no entry. Before the
+// fix, the handler would `continue` on !ok and the pane border would stay
+// on its last format; now, the synthesized "idle" is written.
+func TestTick_OldPresentNewAbsent_PaintsIdle(t *testing.T) {
+	calls := captureTmuxCalls(t)
+
+	m := modelWithTasks(testTasks())
+	m.subStatuses = map[string]status.File{
+		"T-003": {TaskID: "T-003", State: "working"},
+	}
+
+	result, _ := m.Update(statusTickMsg{statuses: map[string]status.File{}})
+	updated := result.(Model)
+
+	if len(updated.subStatuses) != 0 {
+		t.Errorf("subStatuses should be empty after tick, got %d", len(updated.subStatuses))
+	}
+	formats := countBorderFormatCalls(*calls)
+	if len(formats) != 1 {
+		t.Fatalf("expected 1 pane-border-format call, got %d: %v", len(formats), *calls)
+	}
+	if !strings.Contains(formats[0], "IDLE") {
+		t.Errorf("expected IDLE in painted format, got %q", formats[0])
+	}
+}
+
+// TestTick_OldAbsentNewAbsent_NoCall — no entry on either side means
+// nothing to repaint. This is the no-op we rely on to keep the tick cheap
+// on startup (before any writer has produced a file) and forever after a
+// task stays idle.
+func TestTick_OldAbsentNewAbsent_NoCall(t *testing.T) {
+	calls := captureTmuxCalls(t)
+
+	m := modelWithTasks(testTasks())
+	m.subStatuses = map[string]status.File{}
+
+	_, _ = m.Update(statusTickMsg{statuses: map[string]status.File{}})
+
+	formats := countBorderFormatCalls(*calls)
+	if len(formats) != 0 {
+		t.Errorf("expected 0 pane-border-format calls, got %d: %v", len(formats), formats)
+	}
+}
+
+// TestTick_WorkingToIdle_PaintsIdle — the happy-path turn-end transition
+// (regression guard for T-022 shape). Existing entry changes state, so we
+// paint the new format exactly once.
+func TestTick_WorkingToIdle_PaintsIdle(t *testing.T) {
+	calls := captureTmuxCalls(t)
+
+	m := modelWithTasks(testTasks())
+	m.subStatuses = map[string]status.File{
+		"T-003": {TaskID: "T-003", State: "working"},
+	}
+
+	_, _ = m.Update(statusTickMsg{statuses: map[string]status.File{
+		"T-003": {TaskID: "T-003", State: "idle"},
+	}})
+
+	formats := countBorderFormatCalls(*calls)
+	if len(formats) != 1 {
+		t.Fatalf("expected 1 pane-border-format call, got %d: %v", len(formats), formats)
+	}
+	if !strings.Contains(formats[0], "IDLE") {
+		t.Errorf("expected IDLE in painted format, got %q", formats[0])
+	}
+}
+
+// TestTick_IdleToIdle_NoCall — state unchanged, no repaint. This pins the
+// "no spurious writes per tick" property that keeps the 1 s cadence cheap.
+func TestTick_IdleToIdle_NoCall(t *testing.T) {
+	calls := captureTmuxCalls(t)
+
+	m := modelWithTasks(testTasks())
+	m.subStatuses = map[string]status.File{
+		"T-003": {TaskID: "T-003", State: "idle"},
+	}
+
+	_, _ = m.Update(statusTickMsg{statuses: map[string]status.File{
+		"T-003": {TaskID: "T-003", State: "idle"},
+	}})
+
+	formats := countBorderFormatCalls(*calls)
+	if len(formats) != 0 {
+		t.Errorf("expected 0 pane-border-format calls for same-state tick, got %d: %v", len(formats), formats)
 	}
 }
 
