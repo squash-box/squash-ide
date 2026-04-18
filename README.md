@@ -157,6 +157,18 @@ If a new spawn would force any existing pane below `min_pane_width`, the
 spawn is rejected with a clear error rather than silently squeezing panes.
 Close some panes (`Ctrl+B x`) and try again.
 
+### Compact mode — narrow terminals
+
+When the terminal is narrower than 300 columns **and** two or more tasks
+are active, the TUI collapses its pane from 60 cols down to 20 to give
+the spawned panes more horizontal room. Cards still show the task ID
+and a truncated title; the project line is dropped. tmux dialogs (spawn
+confirm, block reason) temporarily expand the pane back to its normal
+width so their prompts remain legible.
+
+To exit compact mode, widen the terminal past 300 cols or deactivate one
+of the active tasks (`d` key) so only a single task remains active.
+
 ### List tasks (JSON)
 
 ```bash

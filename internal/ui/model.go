@@ -70,6 +70,7 @@ type Model struct {
 
 	resetCursorOnLoad bool              // scroll to top after next tasksLoadedMsg
 	tooNarrow         bool              // true when zoomed due to narrow terminal
+	compact           bool              // true while pane is shrunk to CompactListWidth
 	needsRespawn      bool              // true until the first task load triggers respawn
 	RespawnFunc       func([]task.Task) // called once after first load to respawn active panes
 
@@ -196,8 +197,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Synchronous "too narrow" check — zoom/unzoom the TUI pane to
 		// show a full-screen overlay when the terminal can't fit all panes.
+		// Compact-mode check piggybacks on the same tmux call path.
 		if tmux.InSession() {
 			m.checkTooNarrow()
+			m.checkCompactPane(tmux.CurrentPaneID())
 		}
 		return m, nil
 
@@ -214,6 +217,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.resetCursorOnLoad = false
 		}
 		m.clampCursor()
+		// Active count may have changed (dispatch / complete / deactivate /
+		// block all route through loadTasks) — re-evaluate compact mode.
+		if tmux.InSession() {
+			m.checkCompactPane(tmux.CurrentPaneID())
+		}
 		// On the first load, respawn tmux panes for active tasks (or
 		// create the placeholder). Done here rather than before the TUI
 		// starts so the session is fully attached and sized.
@@ -290,7 +298,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.tickStatus()
 
 	case tea.KeyMsg:
-		return m.handleKey(msg)
+		newModel, cmd := m.handleKey(msg)
+		// A keypress may have opened or closed a modal dialog, which
+		// changes isCompact()'s truth value — re-check so the pane
+		// expands back to normal while dialogs render and re-shrinks
+		// once they close.
+		if updated, ok := newModel.(Model); ok {
+			if tmux.InSession() {
+				updated.checkCompactPane(tmux.CurrentPaneID())
+			}
+			return updated, cmd
+		}
+		return newModel, cmd
 	}
 	return m, nil
 }
@@ -760,27 +779,36 @@ func (m Model) View() string {
 }
 
 func (m Model) listViewRender() string {
-	// The task list is always rendered at a fixed width (cfg.Tmux.TUIWidth,
-	// default 60). In tmux mode the pane is pinned to that width anyway, but
-	// clamping here also keeps the layout consistent in no-tmux mode and
-	// during the brief window before tmux finishes reshaping.
+	// The task list is normally rendered at cfg.Tmux.TUIWidth (default 60).
+	// In compact mode — narrow terminal + 2+ active spawns — it collapses
+	// to CompactListWidth to free horizontal space for the tiled panes.
+	compact := m.isCompact()
 	width := m.width
 	maxWidth := m.cfg.Tmux.TUIWidth
 	if maxWidth <= 0 {
 		maxWidth = 60
 	}
-	if width > maxWidth {
-		width = maxWidth
-	}
-	if width < 40 {
-		width = 40
+	if compact {
+		width = CompactListWidth
+	} else {
+		if width > maxWidth {
+			width = maxWidth
+		}
+		if width < 40 {
+			width = 40
+		}
 	}
 
 	var b strings.Builder
 
-	// Top bar: app name + per-status counts.
+	// Top bar: app name + per-status counts. Compact variant uses a
+	// single-char stub + two-char counts to fit CompactListWidth.
 	counts := m.statusCounts()
-	b.WriteString(renderTopBar(width, "squash-ide", "", counts))
+	if compact {
+		b.WriteString(renderTopBarCompact(width, counts))
+	} else {
+		b.WriteString(renderTopBar(width, "squash-ide", "", counts))
+	}
 	b.WriteString("\n")
 
 	if len(m.allTasks) == 0 {
@@ -806,7 +834,7 @@ func (m Model) listViewRender() string {
 		listHeight = 5
 	}
 
-	b.WriteString(m.renderCardList(width, listHeight))
+	b.WriteString(m.renderCardList(width, listHeight, compact))
 
 	// Dialog overlays.
 	if m.confirming != nil {
@@ -847,6 +875,10 @@ func (m Model) listViewRender() string {
 		b.WriteString(helpStyle.Render("[y/enter] confirm  [n/esc] cancel"))
 	case m.blocking != nil:
 		b.WriteString(helpStyle.Render("[enter] submit  [esc] cancel  [type] reason"))
+	case compact:
+		// Compact stands down in dialog/blocking states (see isCompact) so
+		// the only reachable cases here are default and filter-active.
+		b.WriteString(helpLineCompact(m.filterActive, m.filter != ""))
 	case m.filterActive:
 		b.WriteString(helpStyle.Render("[enter] apply  [esc] clear  [type] filter"))
 	default:
@@ -858,10 +890,10 @@ func (m Model) listViewRender() string {
 }
 
 // renderCardList renders the per-section card list, scrolling to keep the
-// cursor visible. Cards have variable height (active = 3 lines, backlog = 2)
-// so we render to a flat line buffer first, find the cursor card's line
-// range, then slice.
-func (m Model) renderCardList(width, height int) string {
+// cursor visible. Cards have variable height (active = 3 lines, backlog = 2;
+// in compact mode: active = 2, backlog = 1) so we render to a flat line
+// buffer first, find the cursor card's line range, then slice.
+func (m Model) renderCardList(width, height int, compact bool) string {
 	var (
 		lines       []string
 		cursorStart = -1
@@ -891,7 +923,7 @@ func (m Model) renderCardList(width, height int) string {
 		if s, ok := m.subStatuses[item.task.ID]; ok {
 			sub = &s
 		}
-		card := renderCard(item.task, selected, width, sub)
+		card := renderCard(item.task, selected, width, sub, compact)
 
 		if selected {
 			cursorStart = len(lines)
