@@ -84,6 +84,28 @@ func TestWriteClaudeSettings_BakesTaskIDIntoCommand(t *testing.T) {
 	}
 }
 
+// TestWriteClaudeSettings_StopMatcherDetails is the T-022 regression guard
+// for the Stop-hook wiring: it locks in the exact `status idle "Turn
+// complete"` command shape so a later refactor cannot silently demote the
+// turn-end signal (which would bring back the "badge stuck on WORKING" bug).
+func TestWriteClaudeSettings_StopMatcherDetails(t *testing.T) {
+	wt := t.TempDir()
+	if err := writeClaudeSettings(wt, "T-022", "/bin/sq"); err != nil {
+		t.Fatalf("writeClaudeSettings: %v", err)
+	}
+	data, _ := os.ReadFile(filepath.Join(wt, ".claude", "settings.json"))
+	cmd := extractHookCommand(t, data, "Stop")
+	if !strings.Contains(cmd, " status idle ") {
+		t.Errorf("Stop command should drive the idle state: %q", cmd)
+	}
+	if !strings.Contains(cmd, "Turn complete") {
+		t.Errorf("Stop command should carry the Turn complete message: %q", cmd)
+	}
+	if !strings.Contains(cmd, "SQUASH_TASK_ID=T-022") {
+		t.Errorf("Stop command should bake the task id: %q", cmd)
+	}
+}
+
 func TestWriteClaudeSettings_UsesProvidedBinaryPath(t *testing.T) {
 	wt := t.TempDir()
 	if err := writeClaudeSettings(wt, "T-001", "/opt/custom/squash-ide"); err != nil {
