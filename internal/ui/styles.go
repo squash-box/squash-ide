@@ -147,6 +147,44 @@ var (
 			Padding(0, 2)
 )
 
+// --- New-task form ----------------------------------------------------------
+
+var (
+	newTaskBoxStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colorOnDark).
+			Padding(1, 2)
+
+	newTaskTitleStyle = lipgloss.NewStyle().
+				Foreground(colorOnDark).
+				Bold(true)
+
+	newTaskHintStyle = lipgloss.NewStyle().
+				Foreground(colorMuted)
+
+	newTaskLabelStyle = lipgloss.NewStyle().
+				Foreground(colorMuted)
+
+	newTaskFieldStyle = lipgloss.NewStyle().
+				Background(lipgloss.Color("236")).
+				Foreground(colorOnDark)
+
+	newTaskFieldFocusStyle = lipgloss.NewStyle().
+				Background(lipgloss.Color("238")).
+				Foreground(colorOnDark).
+				Bold(true)
+
+	newTaskRadioStyle = lipgloss.NewStyle().
+				Foreground(colorMuted).
+				Padding(0, 1)
+
+	newTaskRadioSelStyle = lipgloss.NewStyle().
+				Background(colorWorking).
+				Foreground(colorBadgeFg).
+				Bold(true).
+				Padding(0, 1)
+)
+
 // --- Detail view ------------------------------------------------------------
 
 var (

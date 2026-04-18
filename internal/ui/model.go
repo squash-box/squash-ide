@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -77,14 +78,15 @@ type Model struct {
 	subStatuses map[string]status.File // keyed by task ID
 
 	// Dispatch / cleanup state
-	confirming   *task.Task // non-nil when spawn confirmation dialog is showing
-	completing   *task.Task // non-nil when complete confirmation dialog is showing
-	deactivating *task.Task // non-nil when deactivate confirmation dialog is showing
-	blocking     *task.Task // non-nil when block-reason input is active
-	blockReason  string     // current text buffer for the block reason
-	dispatching  bool       // true while an async op is in progress
-	statusMsg    string     // transient message for status bar
-	statusIsErr  bool       // whether statusMsg is an error
+	confirming   *task.Task   // non-nil when spawn confirmation dialog is showing
+	completing   *task.Task   // non-nil when complete confirmation dialog is showing
+	deactivating *task.Task   // non-nil when deactivate confirmation dialog is showing
+	blocking     *task.Task   // non-nil when block-reason input is active
+	blockReason  string       // current text buffer for the block reason
+	creatingTask *newTaskForm // non-nil when the new-task form is open
+	dispatching  bool         // true while an async op is in progress
+	statusMsg    string       // transient message for status bar
+	statusIsErr  bool         // whether statusMsg is an error
 }
 
 // New creates a new Model from the resolved config.
@@ -148,6 +150,12 @@ type statusTickMsg struct {
 	statuses map[string]status.File
 }
 
+type logTaskDoneMsg struct{}
+
+type logTaskErrMsg struct {
+	err error
+}
+
 func (m Model) loadTasks() tea.Msg {
 	tasks, err := vault.ReadAll(m.vaultPath)
 	return tasksLoadedMsg{tasks: tasks, err: err}
@@ -199,6 +207,59 @@ func (m Model) runDeactivate(t task.Task) tea.Cmd {
 		}
 		return deactivateDoneMsg{taskID: t.ID}
 	}
+}
+
+// runLogTask hands the form data off to the `/log-task` Claude skill, which
+// owns task creation + codebase enrichment. The subprocess runs on the TUI
+// pane's TTY via tea.ExecProcess, so the skill can ask clarifying questions
+// interactively. On completion we reload the vault — the skill has written
+// the new task file, board row, log entry, and entity-page updates itself.
+//
+// Hard-fails if `claude` isn't on PATH; the form deliberately doesn't fall
+// back to a local writer so the single-source-of-truth contract with the
+// skill is preserved.
+func (m Model) runLogTask(f newTaskForm) tea.Cmd {
+	if _, err := exec.LookPath("claude"); err != nil {
+		return func() tea.Msg {
+			return logTaskErrMsg{err: fmt.Errorf("claude CLI not found on PATH — install it to create tasks")}
+		}
+	}
+
+	prompt := buildLogTaskPrompt(f)
+	cmd := exec.Command("claude", prompt)
+	// vault.ExpandHome resolves a leading `~` — the OS's chdir doesn't.
+	cmd.Dir = vault.ExpandHome(m.vaultPath)
+
+	return tea.ExecProcess(cmd, func(err error) tea.Msg {
+		if err != nil {
+			return logTaskErrMsg{err: fmt.Errorf("/log-task: %w", err)}
+		}
+		return logTaskDoneMsg{}
+	})
+}
+
+// buildLogTaskPrompt assembles the free-form $ARGUMENTS string that
+// /log-task parses. Passed as a single argv entry, so no shell quoting is
+// needed — newlines and punctuation are preserved verbatim.
+func buildLogTaskPrompt(f newTaskForm) string {
+	var b strings.Builder
+	b.WriteString("/log-task ")
+	b.WriteString(strings.TrimSpace(f.name))
+	b.WriteString("\n\n")
+	if p := strings.TrimSpace(f.repo); p != "" {
+		b.WriteString("Project: ")
+		b.WriteString(p)
+		b.WriteString("\n")
+	}
+	b.WriteString("Type hint: ")
+	b.WriteString(f.taskType())
+	b.WriteString("\n")
+	if body := strings.TrimSpace(f.prompt); body != "" {
+		b.WriteString("\n")
+		b.WriteString(body)
+		b.WriteString("\n")
+	}
+	return b.String()
 }
 
 // Update handles messages.
@@ -277,6 +338,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// trigger with the correct active-task count.
 		return m, m.loadTasks
 
+	case logTaskDoneMsg:
+		m.dispatching = false
+		m.statusMsg = "/log-task finished"
+		m.statusIsErr = false
+		m.resetCursorOnLoad = true
+		return m, m.loadTasks
+
+	case logTaskErrMsg:
+		m.dispatching = false
+		m.creatingTask = nil
+		m.statusMsg = msg.err.Error()
+		m.statusIsErr = true
+		return m, nil
+
 	case statusTickMsg:
 		old := m.subStatuses
 		m.subStatuses = msg.statuses
@@ -328,6 +403,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// New-task form — takes precedence so keys (including the letters used
+	// elsewhere for list actions) don't leak into the list while the form
+	// is open.
+	if m.creatingTask != nil {
+		return m.handleNewTaskKey(msg)
+	}
+
 	// Block reason input
 	if m.blocking != nil {
 		return m.handleBlockInputKey(msg)
@@ -407,6 +489,32 @@ func (m Model) handleDeactivateConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.deactivating = nil
 		return m, nil
 	}
+	return m, nil
+}
+
+func (m Model) handleNewTaskKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	form, submitted, cancelled := m.creatingTask.handleKey(msg)
+	if cancelled {
+		m.creatingTask = nil
+		return m, nil
+	}
+	if submitted {
+		if m.dispatching {
+			m.statusMsg = "another operation is in progress"
+			m.statusIsErr = true
+			return m, nil
+		}
+		// Hand off to /log-task. We clear the form state before running so
+		// the TTY handover is clean — tea.ExecProcess tears down the alt
+		// screen for the duration, and we want the list to be what renders
+		// underneath if anything flickers.
+		m.creatingTask = nil
+		m.dispatching = true
+		m.statusMsg = "running /log-task..."
+		m.statusIsErr = false
+		return m, m.runLogTask(form)
+	}
+	m.creatingTask = &form
 	return m, nil
 }
 
@@ -576,6 +684,16 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, keys.Refresh):
 		return m, m.loadTasks
+
+	case key.Matches(msg, keys.NewTask):
+		if m.dispatching {
+			m.statusMsg = "another operation is in progress"
+			m.statusIsErr = true
+			return m, nil
+		}
+		f := newNewTaskForm()
+		m.creatingTask = &f
+		return m, nil
 	}
 	return m, nil
 }
@@ -815,6 +933,23 @@ func (m Model) listViewRender() string {
 	b.WriteString(renderTopBar(width, "squash-ide", "", counts))
 	b.WriteString("\n")
 
+	// New-task form takes over the whole pane — there's usually a lot of
+	// information to enter (particularly the prompt), so the bottom-overlay
+	// pattern used for simple y/N dialogs isn't enough.
+	if m.creatingTask != nil {
+		formHeight := m.height - 2 // leave room for the status bar + help
+		if formHeight < 16 {
+			formHeight = 16
+		}
+		b.Reset()
+		b.WriteString(m.creatingTask.view(width, formHeight))
+		b.WriteString("\n")
+		b.WriteString(m.renderStatusBar())
+		b.WriteString("\n")
+		b.WriteString(helpStyle.Render("[tab] field  [←/→] type  [enter] submit  [ctrl+d] submit from prompt  [esc] cancel"))
+		return b.String()
+	}
+
 	if len(m.allTasks) == 0 {
 		b.WriteString(emptyStyle.Render("No tasks found in vault."))
 		b.WriteString("\n")
@@ -882,7 +1017,7 @@ func (m Model) listViewRender() string {
 	case m.filterActive:
 		b.WriteString(helpStyle.Render("[enter] apply  [esc] clear  [type] filter"))
 	default:
-		b.WriteString(helpStyle.Render("j/k nav  enter spawn  c complete  d deactivate  b block  tab detail  / filter  r refresh  q quit"))
+		b.WriteString(helpStyle.Render("j/k nav  enter spawn  t new  c complete  d deactivate  b block  tab detail  / filter  r refresh  q quit"))
 	}
 	b.WriteString("\n")
 
