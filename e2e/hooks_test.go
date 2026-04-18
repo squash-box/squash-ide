@@ -50,6 +50,42 @@ func TestStatus_HookPath_WritesInputRequired(t *testing.T) {
 	}
 }
 
+// TestStatus_HookPath_WritesIdle is the T-022 end-to-end guard. It drives
+// the `squash-ide status idle …` surface that the Claude Code `Stop` hook
+// invokes at every turn-end, and asserts the TUI polling layer
+// (status.ReadAll) sees the transition. This closes the "badge stuck at
+// WORKING after Claude finishes" bug by regression-proofing the pipeline
+// T-021 wired up.
+func TestStatus_HookPath_WritesIdle(t *testing.T) {
+	taskID := "T-e2e-hook-idle"
+
+	_ = status.Remove(taskID)
+	t.Cleanup(func() { _ = status.Remove(taskID) })
+
+	_, stderr, err := runBin(t,
+		[]string{"SQUASH_TASK_ID=" + taskID},
+		"status", "idle", "Turn complete",
+	)
+	if err != nil {
+		t.Fatalf("status subcommand: %v\nstderr: %s", err, stderr)
+	}
+
+	all, err := status.ReadAll()
+	if err != nil {
+		t.Fatalf("status.ReadAll: %v", err)
+	}
+	f, ok := all[taskID]
+	if !ok {
+		t.Fatalf("no entry for %s in %v", taskID, all)
+	}
+	if f.State != "idle" {
+		t.Errorf("state = %q, want idle", f.State)
+	}
+	if f.Message != "Turn complete" {
+		t.Errorf("message = %q, want Turn complete", f.Message)
+	}
+}
+
 // TestStatus_HookPath_RejectsBadState verifies a misconfigured hook surfaces
 // loudly instead of silently mis-writing state.
 func TestStatus_HookPath_RejectsBadState(t *testing.T) {
