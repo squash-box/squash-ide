@@ -1,6 +1,7 @@
 package taskops
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -356,6 +357,30 @@ func TestMoveToArchive(t *testing.T) {
 	}
 }
 
+func TestMoveToArchive_WithPR(t *testing.T) {
+	root := setupActiveTestVault(t)
+	tk := task.Task{
+		ID:     "T-099",
+		Status: "active",
+		Title:  "Test task for cleanup",
+	}
+
+	prURL := "https://github.com/foo/bar/pull/42"
+	newPath, err := MoveToArchive(root, tk, "feat/T-099-test", prURL)
+	if err != nil {
+		t.Fatalf("MoveToArchive: %v", err)
+	}
+
+	data, _ := os.ReadFile(newPath)
+	content := string(data)
+	if !strings.Contains(content, "pr: "+prURL) {
+		t.Errorf("frontmatter missing pr: %s line; got: %s", prURL, content)
+	}
+	if !strings.Contains(content, "branch: feat/T-099-test") {
+		t.Error("frontmatter missing branch field")
+	}
+}
+
 func TestMoveToBlocked(t *testing.T) {
 	root := setupActiveTestVault(t)
 	tk := task.Task{
@@ -451,16 +476,54 @@ func TestUpdateBoardBlock(t *testing.T) {
 	}
 }
 
-func TestAppendLogComplete(t *testing.T) {
+func TestAppendLogComplete_WithoutPR(t *testing.T) {
 	root := setupActiveTestVault(t)
 	tk := task.Task{ID: "T-099", Title: "Test task for cleanup"}
-	if err := AppendLogComplete(root, tk, "feat/T-099-test"); err != nil {
+	if err := AppendLogComplete(root, tk, "feat/T-099-test", ""); err != nil {
 		t.Fatalf("AppendLogComplete: %v", err)
 	}
 	data, _ := os.ReadFile(filepath.Join(root, "wiki/log.md"))
 	content := string(data)
 	if !strings.Contains(content, "complete | T-099") {
 		t.Errorf("log entry missing complete operation: %s", content)
+	}
+	if !strings.Contains(content, "Branch: feat/T-099-test\n") {
+		t.Errorf("log entry should have plain Branch line, got: %s", content)
+	}
+	if strings.Contains(content, "PR:") {
+		t.Errorf("log entry should not have PR suffix when pr is empty: %s", content)
+	}
+}
+
+func TestAppendLogComplete_WithPR(t *testing.T) {
+	root := setupActiveTestVault(t)
+	tk := task.Task{ID: "T-099", Title: "Test task for cleanup"}
+	prURL := "https://github.com/foo/bar/pull/42"
+	if err := AppendLogComplete(root, tk, "feat/T-099-test", prURL); err != nil {
+		t.Fatalf("AppendLogComplete: %v", err)
+	}
+	data, _ := os.ReadFile(filepath.Join(root, "wiki/log.md"))
+	content := string(data)
+	want := "Branch: feat/T-099-test | PR: " + prURL
+	if !strings.Contains(content, want) {
+		t.Errorf("log entry missing %q; got: %s", want, content)
+	}
+}
+
+func TestAppendLogCompleteAfter(t *testing.T) {
+	root := setupActiveTestVault(t)
+	tk := task.Task{ID: "T-099", Title: "Test task for cleanup"}
+	prURL := "https://github.com/foo/bar/pull/42"
+	if err := AppendLogCompleteAfter(root, tk, "feat/T-099-test", prURL); err != nil {
+		t.Fatalf("AppendLogCompleteAfter: %v", err)
+	}
+	data, _ := os.ReadFile(filepath.Join(root, "wiki/log.md"))
+	content := string(data)
+	if !strings.Contains(content, "complete-after | T-099") {
+		t.Errorf("log entry missing complete-after operation: %s", content)
+	}
+	if !strings.Contains(content, "PR: "+prURL) {
+		t.Errorf("complete-after entry missing PR URL: %s", content)
 	}
 }
 
@@ -503,5 +566,73 @@ func TestAddFrontmatterFieldReplacesExisting(t *testing.T) {
 	}
 	if strings.Contains(got, "status: backlog") {
 		t.Error("old value still present after replacement")
+	}
+}
+
+// writeTaskFile is a tiny helper for the FindTaskFile tests below: it drops
+// a minimally-valid task file into vaultRoot/tasks/<dir>/.
+func writeTaskFile(t *testing.T, vaultRoot, dir, taskID string) string {
+	t.Helper()
+	full := filepath.Join(vaultRoot, "tasks", dir)
+	if err := os.MkdirAll(full, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(full, taskID+"-stub.md")
+	if err := os.WriteFile(path, []byte("---\nid: "+taskID+"\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestFindTaskFile_FoundInEachStatusDir(t *testing.T) {
+	for _, dir := range []string{"backlog", "active", "blocked", "archive"} {
+		dir := dir
+		t.Run(dir, func(t *testing.T) {
+			root := t.TempDir()
+			want := writeTaskFile(t, root, dir, "T-007")
+
+			gotPath, gotStatus, err := FindTaskFile(root, "T-007")
+			if err != nil {
+				t.Fatalf("FindTaskFile: %v", err)
+			}
+			if gotPath != want {
+				t.Errorf("path = %q, want %q", gotPath, want)
+			}
+			if gotStatus != dir {
+				t.Errorf("status = %q, want %q", gotStatus, dir)
+			}
+		})
+	}
+}
+
+func TestFindTaskFile_NotFound(t *testing.T) {
+	root := t.TempDir()
+	for _, d := range []string{"backlog", "active", "blocked", "archive"} {
+		if err := os.MkdirAll(filepath.Join(root, "tasks", d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, _, err := FindTaskFile(root, "T-999")
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("err = %v; want errors.Is(err, os.ErrNotExist)", err)
+	}
+}
+
+// TestFindTaskFile_DuplicateUsesDeclaredOrder asserts the documented
+// tie-break: backlog wins over later dirs. If we silently drifted to a
+// last-write-wins behaviour, recovery code that branches on the returned
+// status would land on the wrong arm.
+func TestFindTaskFile_DuplicateUsesDeclaredOrder(t *testing.T) {
+	root := t.TempDir()
+	writeTaskFile(t, root, "archive", "T-007")
+	writeTaskFile(t, root, "backlog", "T-007")
+
+	_, gotStatus, err := FindTaskFile(root, "T-007")
+	if err != nil {
+		t.Fatalf("FindTaskFile: %v", err)
+	}
+	if gotStatus != "backlog" {
+		t.Errorf("status = %q, want %q (statusDirOrder must put backlog first)",
+			gotStatus, "backlog")
 	}
 }

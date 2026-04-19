@@ -73,6 +73,7 @@ func main() {
 		Args:  cobra.ExactArgs(1),
 		RunE:  runComplete,
 	}
+	completeCmd.Flags().String("pr", "", "PR URL to record in the archived task (auto-detected via `gh pr list` when omitted)")
 
 	blockCmd := &cobra.Command{
 		Use:   "block <task-id>",
@@ -335,6 +336,8 @@ func runComplete(cmd *cobra.Command, args []string) error {
 	}
 
 	taskID := args[0]
+	prOverride, _ := cmd.Flags().GetString("pr")
+
 	tasks, err := vault.ReadAll(cfg.Vault)
 	if err != nil {
 		return fmt.Errorf("reading vault: %w", err)
@@ -345,7 +348,7 @@ func runComplete(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("Completing %s...\n", taskID)
-	if err := dispatch.Complete(cfg, *target); err != nil {
+	if err := dispatch.CompleteWithPR(cfg, *target, prOverride); err != nil {
 		return err
 	}
 	fmt.Printf("Done. %s archived; worktree removed.\n", taskID)

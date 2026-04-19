@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/squashbox/squash-ide/internal/config"
+	"github.com/squashbox/squash-ide/internal/ghx"
 	"github.com/squashbox/squash-ide/internal/slug"
 	"github.com/squashbox/squash-ide/internal/spawner"
 	"github.com/squashbox/squash-ide/internal/status"
@@ -139,15 +140,51 @@ func Run(cfg config.Config, t task.Task) (Result, error) {
 	return Result{Branch: branch, WorktreePath: worktreePath}, nil
 }
 
-// Complete archives an active task: removes the worktree, moves the task
-// file from active/ to archive/, updates the board and log. The branch is
-// derived from the task title (same rule used by Run).
+// Complete archives an active task: captures the PR URL via gh, removes the
+// worktree and tmux pane, moves the task file from active/ to archive/, and
+// updates the board and log. The branch is derived from the task title
+// (same rule used by Run).
+//
+// As of [[T-029]], squash-ide owns task lifecycle end-to-end — `/implement`
+// no longer mutates `tasks/active/`, `tasks/archive/`, `tasks/board.md`, or
+// `wiki/log.md`. Pressing `c` in the TUI (or running `squash-ide complete`)
+// is the only path that completes a task.
 func Complete(cfg config.Config, t task.Task) error {
-	if t.Status != "active" {
+	return CompleteWithPR(cfg, t, "")
+}
+
+// CompleteWithPR is Complete with an optional PR URL override. Empty
+// `prOverride` falls back to auto-detection via `gh pr list`. The override
+// is the CLI escape hatch for environments without `gh` or for the rollout
+// case where the PR was created out-of-band.
+//
+// Two status arms:
+//   - active: normal flow — capture URL, archive, update board, log.
+//   - done + file in tasks/archive/: rollout-recovery — finish the worktree
+//     and pane teardown that legacy `/implement` runs left dangling, log a
+//     `complete-after` entry, but do NOT re-archive the task. See [[T-029]]
+//     blast-radius notes.
+//
+// All other statuses are rejected.
+func CompleteWithPR(cfg config.Config, t task.Task, prOverride string) error {
+	vaultRoot := vault.ExpandHome(cfg.Vault)
+
+	rolloutRecovery := false
+	switch t.Status {
+	case "active":
+		// normal path
+	case "done":
+		_, dir, err := taskops.FindTaskFile(vaultRoot, t.ID)
+		if err != nil || dir != "archive" {
+			return fmt.Errorf(
+				"task %s has status %q but no file in tasks/archive — refusing "+
+					"to complete (frontmatter and file location are out of sync)",
+				t.ID, t.Status)
+		}
+		rolloutRecovery = true
+	default:
 		return fmt.Errorf("task %s has status %q — only active tasks can be completed", t.ID, t.Status)
 	}
-
-	vaultRoot := vault.ExpandHome(cfg.Vault)
 
 	repoPath, err := resolveRepo(cfg, t)
 	if err != nil {
@@ -155,6 +192,25 @@ func Complete(cfg config.Config, t task.Task) error {
 	}
 
 	branch := BranchFor(t)
+
+	// Resolve the PR URL: explicit override wins; otherwise auto-detect via
+	// gh. ErrGHMissing and ErrNoPR are degraded states (warn + continue);
+	// any other gh failure (e.g. transient HTTP error) is fatal so the
+	// operator can retry rather than silently dropping the URL.
+	prURL := strings.TrimSpace(prOverride)
+	if prURL == "" {
+		url, err := ghx.PRURLForBranch(repoPath, branch)
+		switch {
+		case err == nil:
+			prURL = url
+		case errors.Is(err, ghx.ErrGHMissing),
+			errors.Is(err, ghx.ErrNoPR),
+			errors.Is(err, ghx.ErrNonGitHubRemote):
+			fmt.Fprintf(os.Stderr, "warning: no PR URL captured for %s: %v\n", t.ID, err)
+		default:
+			return fmt.Errorf("capturing PR URL: %w", err)
+		}
+	}
 
 	// Clean up the MCP status file.
 	_ = status.Remove(t.ID)
@@ -177,13 +233,24 @@ func Complete(cfg config.Config, t task.Task) error {
 	if err := worktree.Remove(repoPath, branch); err != nil {
 		return fmt.Errorf("removing worktree: %w", err)
 	}
-	if _, err := taskops.MoveToArchive(vaultRoot, t, branch, ""); err != nil {
+
+	if rolloutRecovery {
+		// Legacy /implement already moved the file and updated the board /
+		// log. Skip those mutations; just record the recovery in the log so
+		// the operator can see who finished the cleanup.
+		if err := taskops.AppendLogCompleteAfter(vaultRoot, t, branch, prURL); err != nil {
+			return fmt.Errorf("appending to log: %w", err)
+		}
+		return nil
+	}
+
+	if _, err := taskops.MoveToArchive(vaultRoot, t, branch, prURL); err != nil {
 		return fmt.Errorf("archiving task: %w", err)
 	}
 	if err := taskops.UpdateBoardComplete(vaultRoot, t); err != nil {
 		return fmt.Errorf("updating board: %w", err)
 	}
-	if err := taskops.AppendLogComplete(vaultRoot, t, branch); err != nil {
+	if err := taskops.AppendLogComplete(vaultRoot, t, branch, prURL); err != nil {
 		return fmt.Errorf("appending to log: %w", err)
 	}
 	return nil
