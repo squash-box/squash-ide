@@ -167,6 +167,13 @@ func runTmux(t config.Tmux, cwd, execCmd, taskID, title, project string) error {
 		return fmt.Errorf("tmux: re-tile rejected new pane: %w", err)
 	}
 
+	// Keep focus on the TUI — tmux split-window moves focus into the new
+	// pane by default, but the user is queuing more dispatches and needs
+	// the keystroke target to stay on the TUI. Best-effort, mirroring
+	// SpawnPlaceholder: a transient tmux error must not flip a successful
+	// spawn into a failure.
+	_, _ = tmux.SelectPane(tuiPane)
+
 	return nil
 }
 
