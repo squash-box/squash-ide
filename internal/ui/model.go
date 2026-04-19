@@ -67,6 +67,14 @@ type Model struct {
 	width  int
 	height int
 
+	// windowWidth caches the tmux window column count (total terminal width
+	// inside tmux), refreshed at the same handler sites that call
+	// checkCompactPane. isCompact keys on this — not m.width — because in
+	// tmux m.width is the *pane* width, which gets pinned to CompactListWidth
+	// once compact engages and would otherwise leave the predicate stuck.
+	// Outside tmux this stays 0 and isCompact falls back to m.width.
+	windowWidth int
+
 	err error
 
 	resetCursorOnLoad bool              // scroll to top after next tasksLoadedMsg
