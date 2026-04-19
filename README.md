@@ -31,6 +31,25 @@ VERSION=v0.1.0 make install           # stamp a specific version into the binary
 Plain `go build ./cmd/squash-ide` also works — it drops `squash-ide` in the
 current directory.
 
+### Install (Debian/Ubuntu)
+
+Download the `.deb` for the latest release from
+[GitHub Releases](https://github.com/squash-box/squash-ide/releases) and
+install it with apt:
+
+```bash
+sudo apt install ./squash-ide_<version>_linux_amd64.deb
+```
+
+The package drops the binary at `/usr/bin/squash-ide`, registers a
+GNOME/KDE app-menu launcher (opens in your default terminal — `Terminal=true`
+in the `.desktop` entry so the tmux-bootstrapping TUI has a TTY), installs
+the man page (`man squash-ide`), and ships a bash-completion script plus an
+example config at `/usr/share/doc/squash-ide/examples/config.yaml`.
+
+`tmux` and `git` are declared as runtime `Depends:`, so apt will pull them
+in if the target box doesn't already have them.
+
 ## Usage
 
 ### TUI dashboard (default: tmux tiled panes)
@@ -352,10 +371,26 @@ and re-spawn.
 
 ## Release
 
-`v0.1.0` is the first tagged release. To cut a new one:
+`v0.1.0` is the first tagged release. Pushing a `v*` tag triggers
+`.github/workflows/release.yml`, which builds both artefacts and attaches
+them to a GitHub Release:
 
 ```bash
 git tag -a v0.1.0 -m "v0.1.0"
-git push origin v0.1.0
-make dist VERSION=v0.1.0   # produces dist/squash-ide-v0.1.0-<os>-<arch>.tar.gz
+git push origin v0.1.0       # fires the release workflow; produces .tar.gz + .deb on Releases
 ```
+
+To dry-run the same flow locally (requires [nfpm](https://github.com/goreleaser/nfpm)):
+
+```bash
+go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+make release VERSION=v0.1.0-rc1   # test-unit + dist + deb
+```
+
+Individual targets:
+
+| Target            | Artefact                                               |
+|-------------------|--------------------------------------------------------|
+| `make dist`       | `dist/squash-ide-<version>-<os>-<arch>.tar.gz`         |
+| `make deb`        | `dist/squash-ide_<version>_linux_amd64.deb`            |
+| `make release`    | both of the above after unit tests                     |

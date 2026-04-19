@@ -1,0 +1,39 @@
+# Example config for squash-ide.
+#
+# Copy to ~/.config/squash-ide/config.yaml and edit to taste. Every field
+# below can also be overridden by an environment variable (SQUASH_*) or a
+# CLI flag; `squash-ide config` prints the resolved values with per-field
+# provenance.
+
+# Path to the Obsidian vault that holds tasks/{backlog,active,blocked,archive}/
+# and a wiki/ tree. Env: SQUASH_VAULT. Flag: --vault.
+vault: ~/GIT/agentic/tasks/personal
+
+terminal:
+  # Terminal emulator command used when --no-tmux is active. Empty lets
+  # squash-ide auto-detect (ptyxis -> gnome-terminal -> x-terminal-emulator).
+  # Env: SQUASH_TERMINAL. Flag: --terminal.
+  command: ""
+  # Arguments template. {cwd} expands to the worktree path; {exec} expands
+  # to the resolved spawn command (command + expanded args).
+  args: ["--working-directory={cwd}", "--", "bash", "-c", "{exec}"]
+
+spawn:
+  # Command run inside each spawned pane/window. Env: SQUASH_SPAWN_CMD.
+  # Flag: --spawn-cmd.
+  command: claude
+  # Arguments passed to the command. {task_id}, {title}, {project}, {cwd}
+  # and {worktree} are interpolated from the dispatched task.
+  args: ["/implement {task_id}"]
+
+tmux:
+  # Disable to fall back to one OS terminal window per spawn.
+  enabled: true
+  # Session name used by the tmux-bootstrap on TUI start. Re-attach with
+  # `squash-ide` or `tmux attach -t <name>`.
+  session_name: squash-ide
+  # Cols pinned for the TUI on the left.
+  tui_width: 60
+  # Minimum cols per spawned pane. Spawn is rejected (not silently squeezed)
+  # if a new pane would force any peer below this floor.
+  min_pane_width: 80

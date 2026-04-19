@@ -1,0 +1,53 @@
+# nfpm config for squash-ide. Build with:
+#   VERSION=v0.1.0 nfpm pkg --config nfpm.yaml --packager deb --target dist/squash-ide_v0.1.0_linux_amd64.deb
+# or the `make deb` target, which wires the env var for you.
+
+name: squash-ide
+arch: amd64
+platform: linux
+version: ${VERSION}
+section: devel
+priority: optional
+maintainer: "squash-box <noreply@squash-box.github.io>"
+description: |
+  Terminal task dispatcher that turns an Obsidian vault's task queue
+  into a tmux-tiled agentic workflow. Select a task in a Bubble Tea
+  TUI to spawn a git worktree and a claude /implement session in a
+  new tmux pane.
+vendor: squash-box
+homepage: https://github.com/squash-box/squash-ide
+license: MIT
+
+depends:
+  - tmux
+  - git
+
+contents:
+  - src: ./bin/squash-ide
+    dst: /usr/bin/squash-ide
+    file_info:
+      mode: 0755
+  - src: ./bin/squash-ide-mcp
+    dst: /usr/bin/squash-ide-mcp
+    file_info:
+      mode: 0755
+  - src: ./packaging/squash-ide.desktop
+    dst: /usr/share/applications/squash-ide.desktop
+    file_info:
+      mode: 0644
+  - src: ./packaging/squash-ide.1.gz
+    dst: /usr/share/man/man1/squash-ide.1.gz
+    file_info:
+      mode: 0644
+  - src: ./packaging/completions/squash-ide.bash
+    dst: /usr/share/bash-completion/completions/squash-ide
+    file_info:
+      mode: 0644
+  - src: ./packaging/examples/config.yaml
+    dst: /usr/share/doc/squash-ide/examples/config.yaml
+    file_info:
+      mode: 0644
+
+scripts:
+  postinstall: ./packaging/scripts/postinst
+  preremove: ./packaging/scripts/prerm
