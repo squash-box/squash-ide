@@ -13,6 +13,11 @@ import (
 // compactModel builds a Model with a configurable width and active count
 // for isCompact predicate tests. It bypasses modelWithTasks's width=80
 // default so the predicate's width arm is exercised directly.
+//
+// Sets both m.width (pane width) and m.windowWidth (outer terminal width)
+// to the same value — the common non-tmux case where the two are
+// equivalent. Tests that exercise the divergent path (pane pinned narrow
+// while window is wide) override m.windowWidth after construction.
 func compactModel(width, activeCount int) Model {
 	var tasks []task.Task
 	for i := 0; i < activeCount; i++ {
@@ -27,6 +32,7 @@ func compactModel(width, activeCount int) Model {
 	})
 	m := modelWithTasks(tasks)
 	m.width = width
+	m.windowWidth = width
 	return m
 }
 
@@ -50,6 +56,40 @@ func TestIsCompact_TruthTable(t *testing.T) {
 			m := compactModel(tc.width, tc.activeCount)
 			if got := m.isCompact(); got != tc.want {
 				t.Errorf("isCompact() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestIsCompact_WindowWidthArm covers the post-T-028 predicate semantics:
+// isCompact keys on m.windowWidth (the outer terminal width) and only
+// falls back to m.width when windowWidth is unset (non-tmux path). The
+// "window wide / pane narrow" case is the one the bug missed — pane is
+// pinned at 20 by tmux but the user has widened the terminal, so compact
+// must release.
+func TestIsCompact_WindowWidthArm(t *testing.T) {
+	cases := []struct {
+		name        string
+		windowWidth int
+		width       int
+		activeCount int
+		want        bool
+	}{
+		{"window wide, pane narrow — release (the fix)", 400, 20, 3, false},
+		{"window at threshold — not less than 300", 300, 20, 3, false},
+		{"window narrow, pane narrow — stay compact", 299, 20, 3, true},
+		{"non-tmux fallback (windowWidth=0), narrow", 0, 299, 3, true},
+		{"non-tmux fallback (windowWidth=0), wide", 0, 400, 3, false},
+		{"windowWidth shadows m.width when wide", 400, 100, 3, false},
+		{"windowWidth shadows m.width when narrow", 100, 400, 3, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := compactModel(tc.width, tc.activeCount)
+			m.windowWidth = tc.windowWidth
+			if got := m.isCompact(); got != tc.want {
+				t.Errorf("isCompact(windowWidth=%d, width=%d, active=%d) = %v, want %v",
+					tc.windowWidth, tc.width, tc.activeCount, got, tc.want)
 			}
 		})
 	}
@@ -296,12 +336,25 @@ func TestListViewRender_SingleActiveNotCompact(t *testing.T) {
 
 // tmuxRecorder installs a runOutFn that captures every tmux call. Tests
 // inspect its `calls` slice to assert the expected resize-pane shape.
+//
+// Set windowWidth before invoking the code under test to stub
+// `display-message ... #{window_width}` — the tmux call refreshWindowWidth
+// makes. A zero windowWidth leaves the call unanswered (returns "" which
+// makes WindowWidth error out, mirroring a transient tmux failure).
 type tmuxRecorder struct {
-	calls []string
+	calls       []string
+	windowWidth int
 }
 
 func (r *tmuxRecorder) fn(name string, args ...string) (string, error) {
 	r.calls = append(r.calls, name+" "+strings.Join(args, " "))
+	if r.windowWidth > 0 && len(args) > 0 && args[0] == "display-message" {
+		for _, a := range args {
+			if a == "#{window_width}" {
+				return itoa(r.windowWidth) + "\n", nil
+			}
+		}
+	}
 	return "", nil
 }
 
@@ -363,7 +416,9 @@ func TestCheckCompactPane_EntersCompactOnResize(t *testing.T) {
 	}
 	m.compact = false
 
-	// Shrink the terminal to a narrow width with 3 active tasks.
+	// Shrink the outer terminal to a narrow width — tmux will report the
+	// new window width via display-message on the next refresh.
+	r.windowWidth = 200
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 200, Height: 50})
 	u := updated.(Model)
 
@@ -385,6 +440,8 @@ func TestCheckCompactPane_ExitsCompactOnWiden(t *testing.T) {
 		t.Fatal("precondition: should be compact at width=200")
 	}
 
+	// Outer terminal widened — tmux reports the new window width.
+	r.windowWidth = 400
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 400, Height: 50})
 	u := updated.(Model)
 
@@ -400,6 +457,7 @@ func TestCheckCompactPane_ExitsCompactOnWiden(t *testing.T) {
 
 func TestCheckCompactPane_IdempotentWithoutTransition(t *testing.T) {
 	r := tmuxFixture(t, "%1")
+	r.windowWidth = 200
 
 	m := compactModel(200, 3)
 	m.compact = true
@@ -421,6 +479,7 @@ func TestCheckCompactPane_IdempotentWithoutTransition(t *testing.T) {
 
 func TestCheckCompactPane_DialogExpandsPane(t *testing.T) {
 	r := tmuxFixture(t, "%1")
+	r.windowWidth = 200
 
 	m := compactModel(200, 3)
 	m.compact = true
@@ -472,6 +531,87 @@ func TestCheckCompactPane_NoOpOutsideTmux(t *testing.T) {
 
 	if len(r.calls) != 0 {
 		t.Errorf("expected zero tmux calls outside tmux session, got: %v", r.calls)
+	}
+}
+
+// TestCheckCompactPane_ReleasesWhenPanePinnedButWindowWidens is the T-028
+// regression. Pre-fix, isCompact keyed on m.width — once tmux pinned the
+// pane to CompactListWidth (m.width=20), the predicate stayed true even
+// after the user widened the outer terminal, and compact never released.
+//
+// Post-fix, refreshWindowWidth pulls the outer window width from tmux on
+// every checkCompactPane call, so the predicate sees the widened terminal
+// and flips compact off — even though m.width is still pinned at 20.
+func TestCheckCompactPane_ReleasesWhenPanePinnedButWindowWidens(t *testing.T) {
+	r := tmuxFixture(t, "%1")
+
+	// Start in compact, pane pinned at CompactListWidth (mirrors what
+	// tmux leaves m.width at after the resize-pane that engaged compact).
+	m := compactModel(CompactListWidth, 3)
+	m.compact = true
+	if !m.isCompact() {
+		t.Fatal("precondition: should be compact at narrow width")
+	}
+
+	// User widens the outer terminal. tmux does NOT deliver a
+	// WindowSizeMsg (the pane stays pinned at 20), but the next
+	// checkCompactPane call must still release.
+	r.windowWidth = 400
+	m.checkCompactPane("%1")
+
+	if m.compact {
+		t.Error("expected compact to release when windowWidth widened past threshold")
+	}
+	if n := countResizes(r, "%1", 60); n != 1 {
+		t.Errorf("expected one resize-pane back to 60 on release, got %d (calls: %v)",
+			n, r.calls)
+	}
+}
+
+// TestCheckCompactPane_KeystrokeReleasesAfterWiden proves the keystroke
+// release path works end-to-end through the Update → handleKey flow when
+// no WindowSizeMsg is delivered. This is the user-visible recovery path
+// described in the T-028 acceptance criteria ("press any key after
+// widening the terminal").
+func TestCheckCompactPane_KeystrokeReleasesAfterWiden(t *testing.T) {
+	r := tmuxFixture(t, "%1")
+
+	m := compactModel(CompactListWidth, 3)
+	m.compact = true
+
+	// Outer terminal widened; pane still pinned at 20 (m.width unchanged).
+	r.windowWidth = 400
+
+	// Any keystroke routed through Update → handleKey ends in
+	// checkCompactPane, which now reads the widened window width.
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	u := updated.(Model)
+
+	if u.compact {
+		t.Error("expected compact to release after keystroke once windowWidth widened")
+	}
+	if n := countResizes(r, "%1", 60); n != 1 {
+		t.Errorf("expected one resize-pane back to 60 on keystroke release, got %d (calls: %v)",
+			n, r.calls)
+	}
+}
+
+// TestRefreshWindowWidth_ErrorsAreSwallowed asserts the cosmetic-failure
+// pattern from compact.go's package comment: a tmux read failure must not
+// flip the predicate or panic — the previous cached value stands. Mirrors
+// the swallow-on-error contract used for tmux.ResizePane.
+func TestRefreshWindowWidth_ErrorsAreSwallowed(t *testing.T) {
+	// tmuxFixture installs a runner that returns "" for every call when
+	// windowWidth is left at 0; WindowWidth's strconv.Atoi then fails,
+	// driving the error path.
+	_ = tmuxFixture(t, "%1")
+
+	m := compactModel(200, 3)
+	m.windowWidth = 250 // pre-existing cached value
+	m.refreshWindowWidth("%1")
+
+	if m.windowWidth != 250 {
+		t.Errorf("expected windowWidth to remain at 250 on tmux error, got %d", m.windowWidth)
 	}
 }
 
