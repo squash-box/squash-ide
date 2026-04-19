@@ -253,10 +253,30 @@ func AppendLog(vaultRoot string, t task.Task, branch, worktreePath string) error
 	return prependLogEntry(vaultRoot, entry)
 }
 
-// AppendLogComplete adds a completion entry to wiki/log.md.
-func AppendLogComplete(vaultRoot string, t task.Task, branch string) error {
-	entry := fmt.Sprintf("## [%s] complete | %s %s\nBranch: %s\n",
-		time.Now().Format("2006-01-02"), t.ID, t.Title, branch)
+// AppendLogComplete adds a completion entry to wiki/log.md. The optional pr
+// URL is appended as ` | PR: <url>` after the branch when non-empty; an
+// empty pr drops the suffix entirely so a degraded run (no gh, no PR raised
+// yet) still produces a clean log line.
+func AppendLogComplete(vaultRoot string, t task.Task, branch, pr string) error {
+	return appendLogCompletion(vaultRoot, t, "complete", branch, pr)
+}
+
+// AppendLogCompleteAfter adds a recovery completion entry — same shape as
+// AppendLogComplete but tagged "complete-after" — for tasks that were
+// already archived by an upstream tool (legacy `/implement` runs from
+// before squash-ide owned task lifecycle, see [[T-029]]). Surfacing the
+// recovery keeps the log honest about who did what.
+func AppendLogCompleteAfter(vaultRoot string, t task.Task, branch, pr string) error {
+	return appendLogCompletion(vaultRoot, t, "complete-after", branch, pr)
+}
+
+func appendLogCompletion(vaultRoot string, t task.Task, op, branch, pr string) error {
+	body := "Branch: " + branch
+	if pr != "" {
+		body += " | PR: " + pr
+	}
+	entry := fmt.Sprintf("## [%s] %s | %s %s\n%s\n",
+		time.Now().Format("2006-01-02"), op, t.ID, t.Title, body)
 	return prependLogEntry(vaultRoot, entry)
 }
 
@@ -301,6 +321,35 @@ func prependLogEntry(vaultRoot, entry string) error {
 	}
 
 	return os.WriteFile(logPath, []byte(content), 0o644)
+}
+
+// statusDirOrder is the precedence used by FindTaskFile when a task ID
+// happens to exist in more than one status directory. backlog wins over
+// active wins over blocked wins over archive — the earliest stage we'd
+// expect a task in flight, then progressively later ones. Documenting
+// the order keeps recovery code from making a different tie-breaking
+// choice silently.
+var statusDirOrder = []string{"backlog", "active", "blocked", "archive"}
+
+// FindTaskFile locates the .md file for a task ID across all four status
+// directories under vaultRoot/tasks/. Returns the absolute path and the
+// matching status-directory name (one of "backlog", "active", "blocked",
+// "archive"). Returns an error wrapping os.ErrNotExist when no match is
+// found anywhere.
+//
+// When the same ID appears in multiple status dirs (corruption — should not
+// happen in normal operation), the first hit in statusDirOrder wins. The
+// duplicate is left alone; callers that need to assert uniqueness should
+// check the returned status against the task's frontmatter status.
+func FindTaskFile(vaultRoot, taskID string) (path, status string, err error) {
+	for _, dir := range statusDirOrder {
+		srcDir := filepath.Join(vaultRoot, "tasks", dir)
+		if p, ferr := findTaskFile(srcDir, taskID); ferr == nil {
+			return p, dir, nil
+		}
+	}
+	return "", "", fmt.Errorf("task %s not found in any status directory under %s/tasks: %w",
+		taskID, vaultRoot, os.ErrNotExist)
 }
 
 // findTaskFile locates the .md file for a task ID in a directory.

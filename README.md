@@ -47,8 +47,11 @@ in the `.desktop` entry so the tmux-bootstrapping TUI has a TTY), installs
 the man page (`man squash-ide`), and ships a bash-completion script plus an
 example config at `/usr/share/doc/squash-ide/examples/config.yaml`.
 
-`tmux` and `git` are declared as runtime `Depends:`, so apt will pull them
-in if the target box doesn't already have them.
+`tmux`, `git`, and `gh` are declared as runtime `Depends:`, so apt will pull
+them in if the target box doesn't already have them. `gh` is used by
+`squash-ide complete` to auto-detect a task's PR URL from its branch (see
+*Completion* below); pass `--pr <url>` if `gh` is unavailable or the lookup
+should be skipped.
 
 ## Usage
 
@@ -120,11 +123,26 @@ squash-ide spawn --dry-run T-008
 
 ```bash
 squash-ide complete T-008
+# or, with an explicit PR URL (skips gh auto-detection):
+squash-ide complete T-008 --pr https://github.com/owner/repo/pull/42
 ```
 
 Removes the worktree, moves the task from `active/` to `archive/` (stamping
-`status: done` and `completed: <today>`), and records a "complete" entry in
-`wiki/log.md` plus a row under "Recently Completed" on the board.
+`status: done`, `completed: <today>`, `branch:`, and — when available — `pr:`
+into the frontmatter), and records a "complete" entry in `wiki/log.md` plus a
+row under "Recently Completed" on the board.
+
+The PR URL is auto-detected via `gh pr list --head <branch>` against the
+task's repo. Pass `--pr <url>` to override the detection (useful when `gh`
+is not installed or the PR was raised out-of-band). When `gh` is missing or
+the branch has no PR yet, completion still succeeds — a warning prints to
+stderr and the `pr:` field is simply omitted.
+
+squash-ide owns task lifecycle end-to-end: pressing `c` in the TUI or
+running `complete` from the CLI is the single authoritative path that
+moves a task to archive, stamps the frontmatter, updates the board and
+log, and tears down the worktree + tmux pane. Skills like `/implement`
+ship code and report results — they do not mutate task state directly.
 
 ### Block an active task
 

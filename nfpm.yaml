@@ -21,6 +21,7 @@ license: MIT
 depends:
   - tmux
   - git
+  - gh
 
 contents:
   - src: ./bin/squash-ide
