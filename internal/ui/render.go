@@ -103,18 +103,27 @@ func renderPlaceholder(msg string) string {
 // the last is the project (and, when available, tmux pane / progress —
 // currently elided because the model doesn't track per-task panes yet).
 //
+// In compact mode (width≈20) the project line is dropped, shrinking
+// backlog cards to 1 line and active cards to 2. The project is already
+// visible in the top-bar counts and the task-specific pane's tmux border,
+// so repeating it per row in a 20-col sidebar is just noise.
+//
 // When selected, each line gets a left accent bar instead of the usual
 // left padding, so the highlight reads as a vertical stripe down the card.
-func renderCard(t task.Task, selected bool, width int, sub *status.File) []string {
+func renderCard(t task.Task, selected bool, width int, sub *status.File, compact bool) []string {
 	leftPad := "   "
 	if selected {
 		leftPad = " " + cursorBarStyle.Render("▍") + " "
 	}
 
-	// Inner content width (after left padding).
+	// Inner content width (after left padding). In compact mode the outer
+	// width is CompactListWidth (20) and the leftPad eats 3 cols, so innerW
+	// can be as low as 17; truncate() clips content to whatever fits. The
+	// legacy `innerW >= 20` floor has been removed — it used to produce
+	// total widths of ~23 that overflowed the compact budget.
 	innerW := width - lipgloss.Width(leftPad)
-	if innerW < 20 {
-		innerW = 20
+	if innerW < 1 {
+		innerW = 1
 	}
 
 	var lines []string
@@ -132,13 +141,16 @@ func renderCard(t task.Task, selected bool, width int, sub *status.File) []strin
 	title := truncate(t.Title, titleW)
 	lines = append(lines, leftPad+prefix+taskTitleStyle.Render(title))
 
-	// L3: project (dimmed). Tmux pane id + progress bar are placeholders
-	// the data model does not yet feed; once spawn tracking lands, append
-	// "tmux:N ====" on the right side here.
-	proj := projectDimStyle.Render(t.Project)
-	// Indent the meta line under the title (past emoji + id width).
-	metaIndent := strings.Repeat(" ", lipgloss.Width(emoji)+2)
-	lines = append(lines, leftPad+metaIndent+proj)
+	// L3: project (dimmed). Dropped in compact mode to keep rows dense.
+	// Tmux pane id + progress bar are placeholders the data model does not
+	// yet feed; once spawn tracking lands, append "tmux:N ====" on the right
+	// side here.
+	if !compact {
+		proj := projectDimStyle.Render(t.Project)
+		// Indent the meta line under the title (past emoji + id width).
+		metaIndent := strings.Repeat(" ", lipgloss.Width(emoji)+2)
+		lines = append(lines, leftPad+metaIndent+proj)
+	}
 
 	return lines
 }
