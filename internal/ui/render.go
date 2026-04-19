@@ -98,15 +98,23 @@ func renderPlaceholder(msg string) string {
 	return "   " + placeholderStyle.Render(msg)
 }
 
-// renderCard renders a task as 2 (backlog) or 3 (active) lines. The first
-// line is the badge for active tasks; the next is the type+id+title row;
-// the last is the project (and, when available, tmux pane / progress —
-// currently elided because the model doesn't track per-task panes yet).
+// renderCard renders a task as either the expanded shape (2 lines for
+// backlog, 3 for active) or the compact shape (3 lines for backlog, 4 for
+// active). The expanded header packs emoji+id+title onto one row; the
+// compact shape stacks them, giving the title the full inner-width budget
+// instead of the leftover after the id prefix.
 //
-// In compact mode (width≈20) the project line is dropped, shrinking
-// backlog cards to 1 line and active cards to 2. The project is already
-// visible in the top-bar counts and the task-specific pane's tmux border,
-// so repeating it per row in a 20-col sidebar is just noise.
+// Shapes:
+//   - expanded backlog: [header(emoji+id+title), project]
+//   - expanded active:  [badge, header, project]
+//   - compact  backlog: [id(emoji+#NNN), title, project]
+//   - compact  active:  [badge, id, title, project]
+//
+// The compact shape is exactly one row taller than the expanded shape for
+// the same status. The extra row buys legibility in a 20-col sidebar: at
+// that width the expanded header's title field is only ~10 cols after the
+// emoji+id prefix, so most titles truncate to uselessness. Stacking frees
+// the full 17-col inner budget for the title.
 //
 // When selected, each line gets a left accent bar instead of the usual
 // left padding, so the highlight reads as a vertical stripe down the card.
@@ -118,39 +126,40 @@ func renderCard(t task.Task, selected bool, width int, sub *status.File, compact
 
 	// Inner content width (after left padding). In compact mode the outer
 	// width is CompactListWidth (20) and the leftPad eats 3 cols, so innerW
-	// can be as low as 17; truncate() clips content to whatever fits. The
-	// legacy `innerW >= 20` floor has been removed — it used to produce
-	// total widths of ~23 that overflowed the compact budget.
+	// can be as low as 17; truncate() clips content to whatever fits.
 	innerW := width - lipgloss.Width(leftPad)
 	if innerW < 1 {
 		innerW = 1
 	}
 
+	id := taskIDStyle.Render("#" + strings.TrimPrefix(t.ID, "T-"))
+	emoji := typeEmoji(t.Type)
+
 	var lines []string
 
-	// L1: badge (active only).
+	// Badge (active only).
 	if t.Status == "active" {
 		lines = append(lines, leftPad+activeBadge(t, sub))
 	}
 
-	// L2: emoji + #id + title.
-	id := taskIDStyle.Render("#" + strings.TrimPrefix(t.ID, "T-"))
-	emoji := typeEmoji(t.Type)
+	if compact {
+		// Stacked: id line, title line, project line.
+		lines = append(lines, leftPad+emoji+"  "+id)
+		lines = append(lines, leftPad+taskTitleStyle.Render(truncate(t.Title, innerW)))
+		lines = append(lines, leftPad+projectDimStyle.Render(truncate(t.Project, innerW)))
+		return lines
+	}
+
+	// Expanded: single header row packs emoji+id+title.
 	prefix := emoji + "  " + id + "  "
 	titleW := innerW - lipgloss.Width(prefix)
 	title := truncate(t.Title, titleW)
 	lines = append(lines, leftPad+prefix+taskTitleStyle.Render(title))
 
-	// L3: project (dimmed). Dropped in compact mode to keep rows dense.
-	// Tmux pane id + progress bar are placeholders the data model does not
-	// yet feed; once spawn tracking lands, append "tmux:N ====" on the right
-	// side here.
-	if !compact {
-		proj := projectDimStyle.Render(t.Project)
-		// Indent the meta line under the title (past emoji + id width).
-		metaIndent := strings.Repeat(" ", lipgloss.Width(emoji)+2)
-		lines = append(lines, leftPad+metaIndent+proj)
-	}
+	// Project meta line, indented under the title (past emoji + id width).
+	proj := projectDimStyle.Render(t.Project)
+	metaIndent := strings.Repeat(" ", lipgloss.Width(emoji)+2)
+	lines = append(lines, leftPad+metaIndent+proj)
 
 	return lines
 }

@@ -193,37 +193,82 @@ func TestHelpLineCompact_FitsWidth(t *testing.T) {
 	}
 }
 
-func TestRenderCard_CompactBacklog_OneLine(t *testing.T) {
+func TestRenderCard_CompactBacklog_ThreeLines(t *testing.T) {
 	tk := task.Task{
 		ID: "T-042", Type: "feature", Title: "An ordinary backlog title",
 		Project: "squash-ide", Status: "backlog",
 	}
 	lines := renderCard(tk, false, CompactListWidth, nil, true)
-	if len(lines) != 1 {
-		t.Fatalf("compact backlog card: expected 1 line, got %d: %v", len(lines), lines)
+	if len(lines) != 3 {
+		t.Fatalf("compact backlog card: expected 3 lines (id/title/project), got %d: %v", len(lines), lines)
 	}
-	if w := lipgloss.Width(lines[0]); w > CompactListWidth {
-		t.Errorf("line width %d exceeds budget %d: %q", w, CompactListWidth, lines[0])
+	if !strings.Contains(lines[0], "#") {
+		t.Errorf("line 0 (id) should contain '#': %q", lines[0])
+	}
+	if !strings.Contains(lines[1], "An ordinary") {
+		t.Errorf("line 1 (title) should contain title text: %q", lines[1])
+	}
+	if !strings.Contains(lines[2], "squash-ide") {
+		t.Errorf("line 2 (project) should contain project name: %q", lines[2])
+	}
+	for i, line := range lines {
+		if w := lipgloss.Width(line); w > CompactListWidth {
+			t.Errorf("line %d width %d exceeds %d: %q", i, w, CompactListWidth, line)
+		}
 	}
 }
 
-func TestRenderCard_CompactActive_TwoLines(t *testing.T) {
+func TestRenderCard_CompactActive_FourLines(t *testing.T) {
 	tk := task.Task{
 		ID: "T-042", Type: "feature", Title: "An active task with a long title",
 		Project: "squash-ide", Status: "active",
 	}
 	lines := renderCard(tk, false, CompactListWidth, nil, true)
-	if len(lines) != 2 {
-		t.Fatalf("compact active card: expected 2 lines (badge + title), got %d: %v",
+	if len(lines) != 4 {
+		t.Fatalf("compact active card: expected 4 lines (badge/id/title/project), got %d: %v",
 			len(lines), lines)
 	}
-	// The title line must stay inside the budget; the badge line is
-	// lipgloss-styled with padding and may be wider than the literal 20
-	// chars of content, but must not exceed the budget.
+	if !strings.Contains(lines[1], "#") {
+		t.Errorf("line 1 (id) should contain '#': %q", lines[1])
+	}
+	// Title is truncated; check for the first word rather than the full string.
+	if !strings.Contains(lines[2], "An") {
+		t.Errorf("line 2 (title) should contain title text: %q", lines[2])
+	}
+	if !strings.Contains(lines[3], "squash-ide") {
+		t.Errorf("line 3 (project) should contain project name: %q", lines[3])
+	}
 	for i, line := range lines {
 		if w := lipgloss.Width(line); w > CompactListWidth {
 			t.Errorf("line %d width %d exceeds %d: %q", i, w, CompactListWidth, line)
 		}
+	}
+}
+
+// TestRenderCard_CompactIsOneLineTallerThanExpanded locks in the height
+// contract from T-030: compact cards are exactly 1 row taller than
+// expanded cards for the same task status.
+func TestRenderCard_CompactIsOneLineTallerThanExpanded(t *testing.T) {
+	cases := []struct {
+		name   string
+		status string
+	}{
+		{"backlog", "backlog"},
+		{"active", "active"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tk := task.Task{
+				ID: "T-042", Type: "feature", Title: "Normal title",
+				Project: "squash-ide", Status: tc.status,
+			}
+			compactLines := renderCard(tk, false, CompactListWidth, nil, true)
+			expandedLines := renderCard(tk, false, 60, nil, false)
+			if got, want := len(compactLines), len(expandedLines)+1; got != want {
+				t.Errorf("compact should be exactly 1 line taller than expanded: compact=%d expanded=%d",
+					len(compactLines), len(expandedLines))
+			}
+		})
 	}
 }
 
@@ -235,11 +280,13 @@ func TestRenderCard_NonCompact_PreservesProjectLine(t *testing.T) {
 	compactLines := renderCard(tk, false, CompactListWidth, nil, true)
 	normalLines := renderCard(tk, false, 60, nil, false)
 
-	if len(normalLines) <= len(compactLines) {
-		t.Errorf("non-compact should produce more lines than compact; got %d vs %d",
-			len(normalLines), len(compactLines))
+	// Post-T-030 the relationship inverts: compact is now taller than
+	// non-compact because id and title each get their own row.
+	if len(normalLines) >= len(compactLines) {
+		t.Errorf("compact should produce more lines than non-compact; got compact=%d normal=%d",
+			len(compactLines), len(normalLines))
 	}
-	// Non-compact must show the project on its dedicated line.
+	// Non-compact must still show the project on its dedicated line.
 	joined := strings.Join(normalLines, "\n")
 	if !strings.Contains(joined, "squash-ide") {
 		t.Errorf("non-compact card should include project name: %s", joined)
@@ -255,12 +302,74 @@ func TestRenderCard_CompactTruncatesLongTitle(t *testing.T) {
 		Status:  "backlog",
 	}
 	lines := renderCard(tk, false, CompactListWidth, nil, true)
-	if len(lines) != 1 {
-		t.Fatalf("expected 1 line for compact backlog, got %d", len(lines))
+	if len(lines) != 3 {
+		t.Fatalf("expected 3 lines for compact backlog, got %d", len(lines))
 	}
-	if w := lipgloss.Width(lines[0]); w > CompactListWidth {
-		t.Errorf("truncation failed: line width %d exceeds %d: %q",
-			w, CompactListWidth, lines[0])
+	// Title is on line 1 now (id/title/project).
+	if w := lipgloss.Width(lines[1]); w > CompactListWidth {
+		t.Errorf("title truncation failed: line 1 width %d exceeds %d: %q",
+			w, CompactListWidth, lines[1])
+	}
+	// And every line stays inside the budget.
+	for i, line := range lines {
+		if w := lipgloss.Width(line); w > CompactListWidth {
+			t.Errorf("line %d width %d exceeds %d: %q", i, w, CompactListWidth, line)
+		}
+	}
+}
+
+func TestRenderCard_CompactTruncatesLongProject(t *testing.T) {
+	// merton-planning-rag is 19 cols — fits inside innerW=17 only after
+	// clipping to "merton-planni…" (17 cols).
+	tk := task.Task{
+		ID: "T-042", Type: "feature", Title: "short",
+		Project: "merton-planning-rag", Status: "backlog",
+	}
+	lines := renderCard(tk, false, CompactListWidth, nil, true)
+	if len(lines) != 3 {
+		t.Fatalf("expected 3 lines, got %d", len(lines))
+	}
+	if w := lipgloss.Width(lines[2]); w > CompactListWidth {
+		t.Errorf("project truncation failed: line 2 width %d exceeds %d: %q",
+			w, CompactListWidth, lines[2])
+	}
+}
+
+func TestRenderCard_CompactSelected_CursorStripeAllLines(t *testing.T) {
+	tk := task.Task{
+		ID: "T-042", Type: "feature", Title: "Selected title",
+		Project: "squash-ide", Status: "active",
+	}
+	lines := renderCard(tk, true, CompactListWidth, nil, true)
+	if len(lines) != 4 {
+		t.Fatalf("expected 4 lines for selected compact active, got %d", len(lines))
+	}
+	for i, line := range lines {
+		if !strings.Contains(line, "▍") {
+			t.Errorf("line %d missing cursor stripe ▍: %q", i, line)
+		}
+	}
+}
+
+func TestRenderCard_Compact_EmptyTitle(t *testing.T) {
+	tk := task.Task{
+		ID: "T-042", Type: "feature", Title: "",
+		Project: "squash-ide", Status: "backlog",
+	}
+	lines := renderCard(tk, false, CompactListWidth, nil, true)
+	if len(lines) != 3 {
+		t.Fatalf("empty title should not collapse card: expected 3 lines, got %d: %v", len(lines), lines)
+	}
+}
+
+func TestRenderCard_Compact_EmptyProject(t *testing.T) {
+	tk := task.Task{
+		ID: "T-042", Type: "feature", Title: "Title",
+		Project: "", Status: "active",
+	}
+	lines := renderCard(tk, false, CompactListWidth, nil, true)
+	if len(lines) != 4 {
+		t.Fatalf("empty project should not collapse card: expected 4 lines, got %d: %v", len(lines), lines)
 	}
 }
 
