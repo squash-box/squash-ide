@@ -19,7 +19,8 @@
 #   make fmt           — run `gofmt -w .`
 #   make clean         — remove ./bin, ./dist, coverage.*
 #   make dist          — build a tarball under ./dist (requires VERSION)
-#   make release       — print the commands to tag and push a release
+#   make deb           — build a .deb package under ./dist (requires nfpm)
+#   make release       — local dry-run of the release flow: dist + deb
 
 BINARY   := squash-ide
 CMD_PKG  := ./cmd/squash-ide
@@ -41,7 +42,7 @@ BIN_DIR  ?= $(PREFIX)/bin
 
 .PHONY: build build-ide build-mcp install \
 	test test-unit test-e2e test-e2e-tmux \
-	cover cover-html lint vet fmt clean dist release help
+	cover cover-html lint vet fmt clean dist deb release help
 
 help:
 	@echo "targets:"
@@ -58,6 +59,8 @@ help:
 	@echo "  fmt           gofmt -w ."
 	@echo "  clean         remove ./bin, ./dist, coverage.*"
 	@echo "  dist          build a tarball at ./dist/$(BINARY)-$(VERSION).tar.gz"
+	@echo "  deb           build a .deb at ./dist/$(BINARY)_$(VERSION)_linux_amd64.deb"
+	@echo "  release       local dry-run: test-unit + dist + deb"
 
 build: build-ide build-mcp
 
@@ -117,8 +120,33 @@ dist: build
 	tar -C bin -czf dist/$$tarname.tar.gz $(BINARY); \
 	echo "packaged dist/$$tarname.tar.gz"
 
-release:
-	@echo "to cut a release:"
-	@echo "  git tag -a v0.1.0 -m 'v0.1.0'"
-	@echo "  git push origin v0.1.0"
-	@echo "  make dist VERSION=v0.1.0"
+# Build a .deb for linux/amd64 via nfpm. Regenerates the gzipped man page
+# from the roff source each time so the committed `.1` is the source of
+# truth. The gzip is intentionally kept out of source control (see
+# .gitignore) because nfpm needs it on disk at pack time.
+deb: build
+	@command -v nfpm >/dev/null 2>&1 || { \
+		echo "error: nfpm is not on PATH. Install it with:"; \
+		echo "  go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest"; \
+		exit 1; \
+	}
+	@mkdir -p dist
+	@gzip -k -n -f packaging/squash-ide.1
+	VERSION=$(VERSION) nfpm pkg \
+		--config nfpm.yaml \
+		--packager deb \
+		--target dist/$(BINARY)_$(VERSION)_linux_amd64.deb
+	@echo "packaged dist/$(BINARY)_$(VERSION)_linux_amd64.deb"
+
+# Local dry-run of the CI release flow: unit tests must pass, then both
+# artefacts are produced. Actual tagging + push is still a manual decision:
+#   git tag -a v0.1.0 -m 'v0.1.0' && git push origin v0.1.0
+# which fires .github/workflows/release.yml to publish to GitHub Releases.
+release: test-unit dist deb
+	@echo
+	@echo "release artefacts ready in ./dist:"
+	@ls -1 dist/
+	@echo
+	@echo "to publish on GitHub:"
+	@echo "  git tag -a $(VERSION) -m '$(VERSION)'"
+	@echo "  git push origin $(VERSION)"

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Squash IDE
+GenericName=Task Dispatcher
+Comment=TUI task dispatcher with tmux-tiled Claude workflows
+Exec=squash-ide
+Terminal=true
+Categories=Development;System;TerminalEmulator;
+Keywords=tmux;claude;tasks;obsidian;vault;agentic;
+StartupNotify=false

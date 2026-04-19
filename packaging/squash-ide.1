@@ -1,0 +1,147 @@
+.TH SQUASH-IDE 1 "2026-04-18" "squash-ide" "User Commands"
+.SH NAME
+squash-ide \- terminal task dispatcher for vault-based agentic workflows
+.SH SYNOPSIS
+.B squash-ide
+.RI [ options ]
+.br
+.B squash-ide
+.I subcommand
+.RI [ options "] [" args ]
+.SH DESCRIPTION
+.B squash-ide
+reads Obsidian-style task files (with YAML frontmatter) from a vault
+directory and provides a TUI dashboard plus CLI subcommands. Selecting
+a task in the TUI creates a fresh git worktree and dispatches
+.B claude
+with the
+.B /implement
+skill into a new tmux pane tiled beside the TUI.
+.PP
+When invoked with no arguments and tmux is available,
+.B squash-ide
+bootstraps a tmux session named
+.I squash-ide
+and runs the TUI in a left-pinned pane. Task panes spawn to the right
+and share the remaining width equally. This is the default daily
+surface \(em one terminal window, many task panes.
+.PP
+Pass
+.B --no-tmux
+to fall back to the one-OS-window-per-spawn workflow, or set
+.B tmux.enabled: false
+in the config file.
+.SH OPTIONS
+.TP
+.B --vault \fIPATH\fR
+Path to the Obsidian vault. Overrides config file and env.
+.TP
+.B --terminal \fICMD\fR
+Terminal emulator command used when
+.B --no-tmux
+is active.
+.TP
+.B --spawn-cmd \fICMD\fR
+Command to run inside each spawned terminal or tmux pane. Default is
+.BR claude .
+.TP
+.B --no-tmux
+Disable tmux tiled-pane mode; spawn each task in its own OS terminal
+window instead.
+.TP
+.B --tui-width \fIN\fR
+Fixed width (cols) for the TUI pane in tmux mode. Default is 60.
+.TP
+.B --min-pane-width \fIN\fR
+Minimum width (cols) per spawned tmux pane; spawn is rejected if a new
+pane would force any peer below this floor. Default is 80.
+.TP
+.B -v, --version
+Print the version string and exit.
+.TP
+.B -h, --help
+Print help for the root command or a subcommand.
+.SH SUBCOMMANDS
+.TP
+.B list
+Print tasks from the vault as JSON. Accepts
+.BI --status\  backlog|active|blocked|archive
+to filter.
+.TP
+.B spawn \fITASK-ID\fR
+Create a git worktree on
+.IR feat/TASK-ID-<slug>\  off\  origin/main ,
+move the task from
+.I backlog/
+to
+.IR active/ ,
+update
+.I tasks/board.md
+and
+.IR wiki/log.md ,
+and dispatch
+.BR claude .
+Pass
+.B --dry-run
+to preview the actions without executing.
+.TP
+.B complete \fITASK-ID\fR
+Archive an active task: remove its worktree, stamp
+.B status: done
+and
+.B completed: <today>
+in the frontmatter, update the board and log.
+.TP
+.B block \fITASK-ID\fR \fB--reason\fR \fIREASON\fR
+Move an active task to
+.I blocked/
+with a one-line reason appended to the task body. The worktree is
+retained so work can resume when unblocked.
+.TP
+.B config
+Print the resolved configuration with provenance annotations
+(default, config file, env var, flag) per field.
+.TP
+.B worktree clean \fITASK-ID\fR \fR[\fB--deactivate\fR]
+Force-remove a task's worktree directory and local branch. Refuses on
+active tasks unless
+.B --deactivate
+is passed, in which case the task is sent back to the backlog and the
+tmux pane is torn down.
+.TP
+.B worktree adopt \fITASK-ID\fR
+Re-register an orphan worktree directory via
+.BR "git worktree repair" .
+.TP
+.B status \fISTATE\fR \fR[\fIMESSAGE\fR]
+Shell-invocable status writer used by Claude Code hooks to update the
+TUI badge when a permission dialog is showing.
+.SH FILES
+.TP
+.I ~/.config/squash-ide/config.yaml
+Default configuration file. Override with
+.B --vault
+and other flags, or with
+.BR SQUASH_VAULT ,
+.BR SQUASH_TERMINAL ,
+.B SQUASH_SPAWN_CMD
+environment variables.
+.TP
+.I /usr/share/doc/squash-ide/examples/config.yaml
+Example configuration file bundled with the package.
+.SH ENVIRONMENT
+.TP
+.B SQUASH_VAULT
+Vault directory path (overrides config file).
+.TP
+.B SQUASH_TERMINAL
+Terminal emulator command (overrides config file).
+.TP
+.B SQUASH_SPAWN_CMD
+Command to run inside the spawned terminal (overrides config file).
+.SH SEE ALSO
+.BR tmux (1),
+.BR git (1),
+.BR claude (1).
+.SH AUTHOR
+squash-box <https://github.com/squash-box/squash-ide>.

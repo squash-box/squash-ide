@@ -40,3 +40,7 @@ go.work.sum
 
 # MCP config generated per-worktree by dispatch
 .mcp.json
+
+# Packaging build artefact (the roff source `.1` is committed; the gzipped
+# form is regenerated on every `make deb` run).
+packaging/squash-ide.1.gz
