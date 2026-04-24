@@ -445,6 +445,60 @@ func TestLoad_TmuxFlagOverrides(t *testing.T) {
 	}
 }
 
+func TestDeriveSessionName(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"~/GIT/agentic/tasks/personal/", "squash-ide-personal"},
+		{"/tmp/work", "squash-ide-work"},
+		{"/tmp/work/", "squash-ide-work"},
+		{"/var/vaults/project.with.dots", "squash-ide-project-with-dots"},
+		{"/a/b/has space", "squash-ide-has-space"},
+		{"/a/with_under-score", "squash-ide-with_under-score"},
+	}
+	for _, c := range cases {
+		if got := DeriveSessionName(c.in); got != c.want {
+			t.Errorf("DeriveSessionName(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestLoad_SessionNameDerivedFromVault(t *testing.T) {
+	// No tmux.session_name in any layer: derive from vault.
+	clearSquashEnv(t)
+	cfg, err := Load(Overrides{
+		ConfigPath: filepath.Join(t.TempDir(), "none.yaml"),
+		Vault:      "/some/path/myvault",
+	})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Tmux.SessionName != "squash-ide-myvault" {
+		t.Errorf("session_name = %q, want squash-ide-myvault", cfg.Tmux.SessionName)
+	}
+	if cfg.Sources["tmux.session_name"] != SourceDerived {
+		t.Errorf("session_name source = %q, want derived", cfg.Sources["tmux.session_name"])
+	}
+}
+
+func TestLoad_ExplicitSessionNameBeatsDerivation(t *testing.T) {
+	// Explicit session_name in the config file wins over derivation.
+	clearSquashEnv(t)
+	path := writeConfig(t, `tmux:
+  session_name: explicit-name
+`)
+	cfg, err := Load(Overrides{ConfigPath: path, Vault: "/whatever/myvault"})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Tmux.SessionName != "explicit-name" {
+		t.Errorf("session_name = %q, want explicit-name", cfg.Tmux.SessionName)
+	}
+	if cfg.Sources["tmux.session_name"] != SourceFile {
+		t.Errorf("source = %q, want file", cfg.Sources["tmux.session_name"])
+	}
+}
+
 func TestLoad_TmuxOmitInFileKeepsDefault(t *testing.T) {
 	clearSquashEnv(t)
 	// File mentions other things but not tmux at all.

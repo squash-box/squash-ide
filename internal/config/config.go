@@ -25,6 +25,7 @@ const (
 	SourceFile    Source = "file"
 	SourceEnv     Source = "env"
 	SourceFlag    Source = "flag"
+	SourceDerived Source = "derived from vault"
 )
 
 // Terminal describes the terminal emulator to invoke for spawn.
@@ -156,7 +157,37 @@ func Load(ov Overrides) (Config, error) {
 	applyEnv(&cfg)
 	applyOverrides(&cfg, ov)
 
+	// If no layer supplied an explicit tmux.session_name, derive one from the
+	// resolved vault so each vault gets its own tmux session and two concurrent
+	// squash-ide instances pointing at different vaults don't collide.
+	if cfg.Sources["tmux.session_name"] == SourceDefault {
+		cfg.Tmux.SessionName = DeriveSessionName(cfg.Vault)
+		cfg.Sources["tmux.session_name"] = SourceDerived
+	}
+
 	return cfg, nil
+}
+
+// DeriveSessionName returns a tmux-safe session name derived from a vault path.
+// Example: "~/GIT/agentic/tasks/personal/" → "squash-ide-personal".
+// Non-alphanumeric characters (other than `-` and `_`) are replaced with `-`
+// because tmux disallows `.` and `:` in session names.
+func DeriveSessionName(vaultPath string) string {
+	base := filepath.Base(filepath.Clean(ExpandHome(vaultPath)))
+	var b strings.Builder
+	b.WriteString("squash-ide-")
+	for _, r := range base {
+		switch {
+		case r >= 'a' && r <= 'z',
+			r >= 'A' && r <= 'Z',
+			r >= '0' && r <= '9',
+			r == '-', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('-')
+		}
+	}
+	return b.String()
 }
 
 // fileTmux mirrors Tmux but uses *bool so we can tell "user omitted the field"
