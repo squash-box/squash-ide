@@ -236,6 +236,18 @@ has aged past the 5-minute staleness horizon — renders as `○ IDLE` in the
 list and on the tmux pane border; the Stop hook is treated as the
 authoritative turn-end signal.
 
+`input_required` desktop notifications are deduplicated per session and
+expire after ~60 s. While a notification for a given task is on screen,
+subsequent `input_required` hooks for the same task short-circuit instead
+of stacking; once the TTL elapses, a re-fire passes `--replace-id` so the
+existing slot is reused rather than piled on. Users on stacking-prone
+daemons (notably GNOME Shell, which ignores `-t` for critical urgency)
+will no longer see piles of notifications to dismiss after stepping away
+from a paused permission dialog. Per-task marker files live at
+`/tmp/squash-ide/notify/<taskID>.id` and are cleared on every transition
+out of `input_required` (working/idle hooks) and on task end
+(complete/deactivate).
+
 ### Config
 
 ```bash
