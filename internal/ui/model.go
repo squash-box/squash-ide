@@ -79,6 +79,7 @@ type Model struct {
 
 	resetCursorOnLoad bool              // scroll to top after next tasksLoadedMsg
 	tooNarrow         bool              // true when zoomed due to narrow terminal
+	formZoomed        bool              // true while pane is zoomed for the new-task form
 	compact           bool              // true while pane is shrunk to CompactListWidth
 	needsRespawn      bool              // true until the first task load triggers respawn
 	RespawnFunc       func([]task.Task) // called once after first load to respawn active panes
@@ -421,6 +422,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if updated, ok := newModel.(Model); ok {
 			if tmux.InSession() {
 				updated.checkCompactPane(tmux.CurrentPaneID())
+				updated.checkFormZoom()
 			}
 			return updated, cmd
 		}
@@ -523,6 +525,12 @@ func (m Model) handleNewTaskKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	form, submitted, cancelled := m.creatingTask.handleKey(msg)
 	if cancelled {
 		m.creatingTask = nil
+		// The handler-tail re-check covers this path too, but call
+		// explicitly to keep the lifecycle symmetric with submit and to
+		// guard against future refactors that change the tail behaviour.
+		if tmux.InSession() {
+			m.checkFormZoom()
+		}
 		return m, nil
 	}
 	if submitted {
@@ -539,6 +547,12 @@ func (m Model) handleNewTaskKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.dispatching = true
 		m.statusMsg = "running /log-task..."
 		m.statusIsErr = false
+		// Un-zoom before tea.ExecProcess hands the TTY to claude — the
+		// handler-tail re-check doesn't run on this branch (the cmd
+		// suspends bubbletea before Update returns to it).
+		if tmux.InSession() {
+			m.checkFormZoom()
+		}
 		return m, m.runLogTask(form)
 	}
 	m.creatingTask = &form
@@ -901,6 +915,35 @@ func (m *Model) checkTooNarrow() {
 		tmux.ToggleZoom(pane)
 	} else if ww >= needed && m.tooNarrow {
 		m.tooNarrow = false
+		tmux.ToggleZoom(pane)
+	}
+}
+
+// checkFormZoom mirrors checkTooNarrow's transition-only state machine for
+// the new-task form: while the form is open we want the TUI pane zoomed so
+// the form covers the spawned agent panes (or placeholder) and renders at
+// full window width — the form is unusable when the pane is pinned to
+// CompactListWidth=20.
+//
+// Coordinates with checkTooNarrow so the two consumers can never emit an
+// unbalanced ToggleZoom: if checkTooNarrow already holds zoom on, we record
+// formZoomed=false and emit no toggle, so closing the form won't release
+// tooNarrow's overlay.
+func (m *Model) checkFormZoom() {
+	pane := tmux.CurrentPaneID()
+	if pane == "" {
+		return
+	}
+	if m.tooNarrow {
+		m.formZoomed = false
+		return
+	}
+	want := m.creatingTask != nil
+	if want && !m.formZoomed {
+		m.formZoomed = true
+		tmux.ToggleZoom(pane)
+	} else if !want && m.formZoomed {
+		m.formZoomed = false
 		tmux.ToggleZoom(pane)
 	}
 }

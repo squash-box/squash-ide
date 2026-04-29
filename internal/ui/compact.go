@@ -40,7 +40,7 @@ func (m Model) isCompact() bool {
 		return false
 	}
 	if m.confirming != nil || m.completing != nil || m.deactivating != nil ||
-		m.blocking != nil {
+		m.blocking != nil || m.creatingTask != nil {
 		return false
 	}
 	return activeTaskCount(m.allTasks) >= CompactMinActiveSpawns
