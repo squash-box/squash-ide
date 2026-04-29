@@ -314,6 +314,46 @@ func TestSetPaneOption_ErrorsOnEmpty(t *testing.T) {
 	}
 }
 
+func TestSetPaneRemainOnExit_BuildsCommand(t *testing.T) {
+	r := newRecorder(t)
+	r.respond("tmux set-option -pt %5 remain-on-exit on", "", nil)
+
+	if err := SetPaneRemainOnExit("%5"); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.calls) != 1 {
+		t.Fatalf("got %d calls, want 1: %#v", len(r.calls), r.calls)
+	}
+	wantArgs := []string{"set-option", "-pt", "%5", "remain-on-exit", "on"}
+	if got := r.calls[0]; got.name != "tmux" || strings.Join(got.args, " ") != strings.Join(wantArgs, " ") {
+		t.Errorf("got call %v, want tmux %v", got, wantArgs)
+	}
+}
+
+func TestSetPaneRemainOnExit_ErrorsOnEmpty(t *testing.T) {
+	if err := SetPaneRemainOnExit(""); err == nil {
+		t.Error("expected err on empty pane id")
+	} else if !strings.Contains(err.Error(), "pane id required") {
+		t.Errorf("unexpected err: %v", err)
+	}
+}
+
+func TestSetPaneRemainOnExit_WrapsTmuxError(t *testing.T) {
+	r := newRecorder(t)
+	r.respond("tmux set-option -pt %5 remain-on-exit on", "", errors.New("tmux: no such pane"))
+
+	err := SetPaneRemainOnExit("%5")
+	if err == nil {
+		t.Fatal("expected err")
+	}
+	if !strings.Contains(err.Error(), "%5") {
+		t.Errorf("err should include pane id, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "no such pane") {
+		t.Errorf("err should wrap underlying tmux err, got: %v", err)
+	}
+}
+
 func TestSetPaneTask_NoOpOnEmpty(t *testing.T) {
 	if err := SetPaneTask("", "T-001"); err != nil {
 		t.Error(err)

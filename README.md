@@ -92,6 +92,13 @@ Spawned panes are normal tmux panes — close one with `Ctrl+B x` (default tmux
 prefix) and the rest re-tile on next spawn. Detach the whole session with
 `Ctrl+B d`; reattach by re-running `squash-ide`.
 
+Spawned panes have `remain-on-exit on` set, so when the inner `claude`
+process finishes its turn the pane stays open showing tmux's "Pane is dead"
+banner with the exit code. This preserves the final output (PR URL printed
+by `/implement`, the `/exit` hint, error traces) for you to read. Close the
+dead pane with `Ctrl+B x`, or run `squash-ide complete T-NNN` (or press `c`
+in the TUI) to archive the task and reap the pane in one step.
+
 If `tmux` is not on `$PATH`, squash-ide prints a warning and falls back to
 the `--no-tmux` behaviour below.
 
