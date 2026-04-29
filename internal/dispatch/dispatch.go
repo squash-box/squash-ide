@@ -212,8 +212,9 @@ func CompleteWithPR(cfg config.Config, t task.Task, prOverride string) error {
 		}
 	}
 
-	// Clean up the MCP status file.
+	// Clean up the MCP status file and any leftover notify marker.
 	_ = status.Remove(t.ID)
+	_ = status.RemoveNotify(t.ID)
 
 	// Kill the task's tmux pane if running.
 	if cfg.Tmux.Enabled && tmux.InSession() {
@@ -298,8 +299,9 @@ func Deactivate(cfg config.Config, t task.Task) error {
 
 	branch := BranchFor(t)
 
-	// Clean up the MCP status file.
+	// Clean up the MCP status file and any leftover notify marker.
 	_ = status.Remove(t.ID)
+	_ = status.RemoveNotify(t.ID)
 
 	// Kill the task's tmux pane if running. Best-effort — the task may
 	// not have a pane (e.g. spawned in OS-window mode or leftover from

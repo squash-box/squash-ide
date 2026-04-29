@@ -13,13 +13,17 @@ import (
 
 // statusTempDir redirects the status package's output directory to a fresh
 // tempdir for the duration of the test. Returns the dir path so tests can
-// assert on file contents.
+// assert on file contents. Also redirects the per-task notify-marker dir
+// so tests that drive input_required transitions don't leak marker files
+// into /tmp/squash-ide/notify/.
 func statusTempDir(t *testing.T) string {
 	t.Helper()
-	d := filepath.Join(t.TempDir(), "status")
-	restore := status.SetDirForTesting(d)
-	t.Cleanup(restore)
-	return d
+	root := t.TempDir()
+	restoreStatus := status.SetDirForTesting(filepath.Join(root, "status"))
+	restoreNotify := status.SetNotifyDirForTesting(filepath.Join(root, "notify"))
+	t.Cleanup(restoreStatus)
+	t.Cleanup(restoreNotify)
+	return filepath.Join(root, "status")
 }
 
 func TestStatus_HappyPath_InputRequired(t *testing.T) {

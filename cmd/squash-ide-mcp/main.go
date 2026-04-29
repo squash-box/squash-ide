@@ -186,9 +186,12 @@ func handleToolCall(taskID string, req *jsonRPCRequest) *jsonRPCResponse {
 
 	fmt.Fprintf(os.Stderr, "squash-ide-mcp: %s → %s: %s\n", taskID, args.State, args.Message)
 
-	// Fire desktop notification for input_required.
+	// Fire desktop notification for input_required, drop the dedup marker
+	// on every other transition so the next input_required is fresh.
 	if args.State == "input_required" {
 		status.NotifyInputRequired(taskID, args.Message)
+	} else {
+		_ = status.RemoveNotify(taskID)
 	}
 
 	return success(req.ID, mcpToolResult{

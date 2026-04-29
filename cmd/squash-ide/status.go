@@ -56,6 +56,10 @@ func runStatus(cmd *cobra.Command, args []string) error {
 
 	if state == "input_required" {
 		status.NotifyInputRequired(taskID, message)
+	} else {
+		// Transition out of input_required — drop the dedup marker so the
+		// next input_required for this session raises a fresh notification.
+		_ = status.RemoveNotify(taskID)
 	}
 	return nil
 }
