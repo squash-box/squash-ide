@@ -133,6 +133,14 @@ func TestIsCompact_DialogsDisable(t *testing.T) {
 			t.Error("expected compact to stand down while block input open")
 		}
 	})
+	t.Run("new-task form open", func(t *testing.T) {
+		m := base
+		f := newNewTaskForm()
+		m.creatingTask = &f
+		if m.isCompact() {
+			t.Error("expected compact to stand down while new-task form open")
+		}
+	})
 }
 
 func TestRenderTopBarCompact_FitsWidth(t *testing.T) {
