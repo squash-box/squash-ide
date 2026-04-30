@@ -161,6 +161,14 @@ func runTmux(t config.Tmux, cwd, execCmd, taskID, title, project string) error {
 		_ = tmux.SetPaneBorderFormat(newPane, TaskBorderFormatWithState(taskID, title, project, "working"))
 	}
 
+	// Keep the pane open after `claude` exits so the user can read the final
+	// output (PR URL printed by /implement, /exit hint, error trace) before
+	// closing it manually or via complete/deactivate. Best-effort, mirroring
+	// the SelectPane idiom below: a transient tmux glitch must not flip a
+	// successful spawn into a failure. kill-pane overrides remain-on-exit,
+	// so dispatch.Complete / Deactivate still tear the pane down cleanly.
+	_ = tmux.SetPaneRemainOnExit(newPane)
+
 	// Pin TUI + distribute remaining space equally among task panes.
 	if _, err := tmux.ReTile(tuiPane, t.TUIWidth, t.PaneWidth, t.MinPaneWidth); err != nil {
 		_ = killPane(newPane)

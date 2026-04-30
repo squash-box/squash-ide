@@ -454,6 +454,25 @@ func SetPaneOption(paneID, key, value string) error {
 	return nil
 }
 
+// SetPaneRemainOnExit toggles tmux's remain-on-exit option on the given
+// pane so the pane stays open after its foreground process exits, showing
+// tmux's "Pane is dead" banner until the user closes it (or until
+// dispatch.Complete / dispatch.Deactivate kill it explicitly — kill-pane
+// is unaffected by this option). Per-pane scope (-p) — does not affect
+// global tmux behaviour or unrelated panes.
+//
+// Without this, tmux reaps the spawned pane the moment claude exits,
+// losing any final output (PR URL, error trace, /exit hint).
+func SetPaneRemainOnExit(paneID string) error {
+	if paneID == "" {
+		return fmt.Errorf("tmux SetPaneRemainOnExit: pane id required")
+	}
+	if _, err := runOut("tmux", "set-option", "-pt", paneID, "remain-on-exit", "on"); err != nil {
+		return fmt.Errorf("tmux set-option remain-on-exit on %s: %w", paneID, err)
+	}
+	return nil
+}
+
 // SetPaneTask tags a pane with @squash-task=<taskID> so the deactivate
 // flow can locate the pane associated with a given task.
 func SetPaneTask(paneID, taskID string) error {

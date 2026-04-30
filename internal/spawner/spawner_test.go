@@ -362,6 +362,74 @@ func TestRunTmux_SelectPaneErrorSwallowed(t *testing.T) {
 	}
 }
 
+func TestRunTmux_SetsRemainOnExitBetweenSplitAndSelect(t *testing.T) {
+	t.Setenv("TMUX_PANE", "%1")
+	r := &tmuxRecorder{
+		tuiPaneID:   "%1",
+		newPaneID:   "%2",
+		windowWidth: 300,
+	}
+	swapTmuxRunOut(t, r)
+
+	cfg := config.Tmux{TUIWidth: 60, PaneWidth: 0, MinPaneWidth: 80}
+	if err := runTmux(cfg, "/tmp/wd", "claude", "T-035", "title", "squash-ide"); err != nil {
+		t.Fatalf("runTmux: %v", err)
+	}
+
+	wantCall := "tmux set-option -pt %2 remain-on-exit on"
+	if countCalls(r, wantCall) != 1 {
+		t.Errorf("expected exactly one %q; calls:\n%s",
+			wantCall, strings.Join(r.calls, "\n"))
+	}
+
+	// Ordering: split-window must precede remain-on-exit, which must precede
+	// the final select-pane (the focus-restore from T-031).
+	splitIdx, remainIdx, selectIdx := -1, -1, -1
+	for i, c := range r.calls {
+		switch {
+		case strings.Contains(c, "split-window") && splitIdx == -1:
+			splitIdx = i
+		case c == wantCall && remainIdx == -1:
+			remainIdx = i
+		case c == "tmux select-pane -t %1" && selectIdx == -1:
+			selectIdx = i
+		}
+	}
+	if splitIdx == -1 || remainIdx == -1 || selectIdx == -1 {
+		t.Fatalf("missing call (split=%d remain=%d select=%d):\n%s",
+			splitIdx, remainIdx, selectIdx, strings.Join(r.calls, "\n"))
+	}
+	if !(splitIdx < remainIdx && remainIdx < selectIdx) {
+		t.Errorf("call order wrong: split=%d remain=%d select=%d\ncalls:\n%s",
+			splitIdx, remainIdx, selectIdx, strings.Join(r.calls, "\n"))
+	}
+}
+
+func TestRunTmux_RemainOnExitErrorSwallowed(t *testing.T) {
+	t.Setenv("TMUX_PANE", "%1")
+	r := &tmuxRecorder{
+		tuiPaneID:   "%1",
+		newPaneID:   "%2",
+		windowWidth: 300,
+		errOn: map[string]error{
+			"set-option -pt %2 remain-on-exit on": errors.New("tmux: option fail"),
+		},
+	}
+	swapTmuxRunOut(t, r)
+
+	cfg := config.Tmux{TUIWidth: 60, PaneWidth: 0, MinPaneWidth: 80}
+	if err := runTmux(cfg, "/tmp/wd", "claude", "T-035", "title", "squash-ide"); err != nil {
+		t.Fatalf("runTmux must swallow SetPaneRemainOnExit errors, got: %v", err)
+	}
+	// Final select-pane (T-031 focus restore) must still fire after the
+	// swallowed error.
+	want := "tmux select-pane -t %1"
+	if last := lastTmuxCall(r); last != want {
+		t.Errorf("last tmux call = %q, want %q\ncalls:\n%s",
+			last, want, strings.Join(r.calls, "\n"))
+	}
+}
+
 func TestSetRunner_RoundTrip(t *testing.T) {
 	orig := runner
 	fake := fakerunner.New(t)
