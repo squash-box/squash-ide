@@ -443,6 +443,13 @@ func SelectPane(paneID string) (string, error) {
 	return runOut("tmux", "select-pane", "-t", paneID)
 }
 
+// SwitchClient routes the active client to the given tmux target (typically
+// a session name). Used by notify-watch to bring the squash-ide session
+// forward when a notification is clicked from outside it.
+func SwitchClient(target string) (string, error) {
+	return runOut("tmux", "switch-client", "-t", target)
+}
+
 // SetPaneOption sets a user-defined tmux option on a pane.
 func SetPaneOption(paneID, key, value string) error {
 	if paneID == "" {

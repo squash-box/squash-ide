@@ -248,6 +248,16 @@ from a paused permission dialog. Per-task marker files live at
 out of `input_required` (working/idle hooks) and on task end
 (complete/deactivate).
 
+Each `input_required` notification is also actionable: clicking the body
+or its single "Focus" action button brings the squash-ide tmux session
+forward and selects the pane bound to that task — handy when several
+spawned panes are tiled and you don't want to hunt for the one that's
+paused on a permission dialog. The hook process itself stays sub-second:
+it fork-and-detaches a hidden `squash-ide notify-watch` subcommand that
+holds `notify-send` open with `--wait` and `--action`, so Claude Code's
+"hooks complete quickly" contract is preserved. Click-to-focus is a
+best-effort no-op under `--no-tmux` (no session to switch to).
+
 ### Config
 
 ```bash

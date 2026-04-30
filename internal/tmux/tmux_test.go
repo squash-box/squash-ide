@@ -262,6 +262,31 @@ func TestFindPaneByTask_Matches(t *testing.T) {
 	}
 }
 
+func TestSwitchClient_PassesTarget(t *testing.T) {
+	r := newRecorder(t)
+	r.respond("tmux switch-client -t squash-ide", "", nil)
+
+	if _, err := SwitchClient("squash-ide"); err != nil {
+		t.Fatalf("SwitchClient: %v", err)
+	}
+	if len(r.calls) != 1 || r.calls[0].name != "tmux" {
+		t.Fatalf("expected one tmux call, got %+v", r.calls)
+	}
+	got := strings.Join(r.calls[0].args, " ")
+	if got != "switch-client -t squash-ide" {
+		t.Errorf("argv = %q, want \"switch-client -t squash-ide\"", got)
+	}
+}
+
+func TestSwitchClient_PropagatesError(t *testing.T) {
+	r := newRecorder(t)
+	r.respond("tmux switch-client -t nope", "", errors.New("can't find session"))
+
+	if _, err := SwitchClient("nope"); err == nil {
+		t.Fatal("expected error from missing session")
+	}
+}
+
 func TestCountPanesByOption(t *testing.T) {
 	r := newRecorder(t)
 	r.respond("tmux list-panes -t %1 -F #{pane_id} #{@squash-task}",
