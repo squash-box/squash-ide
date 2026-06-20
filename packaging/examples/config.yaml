@@ -9,6 +9,14 @@
 # and a wiki/ tree. Env: SQUASH_VAULT. Flag: --vault.
 vault: ~/GIT/agentic/tasks/personal
 
+# Window-management engine. Env: SQUASH_ENGINE. Flag: --engine.
+#   tmux   (default) bootstraps a tmux session and tiles spawned task panes
+#          to the right of the TUI — the shipping workflow.
+#   native renders an in-process pane region inside the TUI with no tmux
+#          dependency. Opt-in / experimental: the region is currently an
+#          empty placeholder (spawning tasks into it lands in a later task).
+engine: tmux
+
 terminal:
   # Terminal emulator command used when --no-tmux is active. Empty lets
   # squash-ide auto-detect (ptyxis -> gnome-terminal -> x-terminal-emulator).

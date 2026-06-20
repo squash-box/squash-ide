@@ -17,6 +17,7 @@ type keyMap struct {
 	Block      key.Binding
 	Deactivate key.Binding
 	NewTask    key.Binding
+	PaneFocus  key.Binding
 }
 
 var keys = keyMap{
@@ -73,5 +74,12 @@ var keys = keyMap{
 	NewTask: key.NewBinding(
 		key.WithKeys("t"),
 		key.WithHelp("t", "new task"),
+	),
+	// PaneFocus toggles focus between the task list and the native pane region
+	// (native engine only). ctrl+w reads as "window focus" and is reserved —
+	// it is intercepted, never forwarded to a focused pane's child.
+	PaneFocus: key.NewBinding(
+		key.WithKeys("ctrl+w"),
+		key.WithHelp("ctrl+w", "focus pane"),
 	),
 }

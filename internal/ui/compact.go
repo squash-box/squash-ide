@@ -32,6 +32,14 @@ const (
 // of truth. Outside tmux, m.windowWidth stays 0 and the predicate falls
 // back to m.width, which is the terminal width directly.
 func (m Model) isCompact() bool {
+	// Compact mode is a tmux-pane-width behaviour: it shrinks the TUI pane so
+	// tmux can give the recovered columns to spawned panes. The native engine
+	// composes the list and pane region itself at full terminal width, so
+	// compact never applies — and in native mode m.width is the whole terminal,
+	// which would otherwise trip the <300-col trigger spuriously.
+	if m.engineNative {
+		return false
+	}
 	w := m.windowWidth
 	if w <= 0 {
 		w = m.width

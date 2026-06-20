@@ -23,7 +23,7 @@ func writeConfig(t *testing.T, body string) string {
 // clearSquashEnv unsets every SQUASH_* env var for the duration of the test.
 func clearSquashEnv(t *testing.T) {
 	t.Helper()
-	for _, k := range []string{"SQUASH_VAULT", "SQUASH_TERMINAL", "SQUASH_SPAWN_CMD"} {
+	for _, k := range []string{"SQUASH_VAULT", "SQUASH_ENGINE", "SQUASH_TERMINAL", "SQUASH_SPAWN_CMD"} {
 		t.Setenv(k, "")
 		os.Unsetenv(k)
 	}
@@ -442,6 +442,87 @@ func TestLoad_TmuxFlagOverrides(t *testing.T) {
 	}
 	if cfg.Tmux.MinPaneWidth != 120 {
 		t.Errorf("tmux.min_pane_width = %d, want 120 (flag)", cfg.Tmux.MinPaneWidth)
+	}
+}
+
+func TestEngineDefault(t *testing.T) {
+	d := Defaults()
+	if d.Engine != EngineTmux {
+		t.Errorf("default engine = %q, want %q", d.Engine, EngineTmux)
+	}
+	if d.Sources["engine"] != SourceDefault {
+		t.Errorf("engine source = %q, want default", d.Sources["engine"])
+	}
+}
+
+func TestLoad_EngineFromFile(t *testing.T) {
+	clearSquashEnv(t)
+	path := writeConfig(t, "engine: native\n")
+	cfg, err := Load(Overrides{ConfigPath: path})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Engine != EngineNative {
+		t.Errorf("engine = %q, want %q", cfg.Engine, EngineNative)
+	}
+	if cfg.Sources["engine"] != SourceFile {
+		t.Errorf("engine source = %q, want file", cfg.Sources["engine"])
+	}
+}
+
+func TestLoad_EngineEnvOverridesFile(t *testing.T) {
+	clearSquashEnv(t)
+	path := writeConfig(t, "engine: native\n")
+	t.Setenv("SQUASH_ENGINE", "tmux")
+	cfg, err := Load(Overrides{ConfigPath: path})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Engine != EngineTmux {
+		t.Errorf("engine = %q, want tmux (env over file)", cfg.Engine)
+	}
+	if cfg.Sources["engine"] != SourceEnv {
+		t.Errorf("engine source = %q, want env", cfg.Sources["engine"])
+	}
+}
+
+func TestLoad_EngineFlagOverridesFile(t *testing.T) {
+	// A `--engine tmux` flag must beat an `engine: native` file value.
+	clearSquashEnv(t)
+	path := writeConfig(t, "engine: native\n")
+	cfg, err := Load(Overrides{ConfigPath: path, Engine: EngineTmux})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Engine != EngineTmux {
+		t.Errorf("engine = %q, want tmux (flag over file)", cfg.Engine)
+	}
+	if cfg.Sources["engine"] != SourceFlag {
+		t.Errorf("engine source = %q, want flag", cfg.Sources["engine"])
+	}
+}
+
+func TestLoad_InvalidEngine(t *testing.T) {
+	clearSquashEnv(t)
+	path := writeConfig(t, "engine: zellij\n")
+	_, err := Load(Overrides{ConfigPath: path})
+	if err == nil {
+		t.Fatal("expected error for unknown engine, got nil")
+	}
+	for _, want := range []string{"zellij", EngineTmux, EngineNative} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should mention %q, got: %v", want, err)
+		}
+	}
+}
+
+func TestFormat_IncludesEngine(t *testing.T) {
+	cfg := Defaults()
+	cfg.Engine = EngineNative
+	cfg.Sources["engine"] = SourceFlag
+	out := cfg.Format()
+	if !strings.Contains(out, "engine: native (from flag)") {
+		t.Errorf("format should show engine line, got: %s", out)
 	}
 }
 

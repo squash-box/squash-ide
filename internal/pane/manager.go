@@ -189,6 +189,19 @@ func (m *Manager) Focus(id string) error {
 	return nil
 }
 
+// WriteToFocused forwards raw input bytes (typically from EncodeKey) to the
+// focused pane's child PTY. It returns (0, nil) when no pane is focused, so the
+// native UI's input router (T-038) can forward a keystroke unconditionally
+// without first nil-checking Focused(). A write to a closed pane surfaces the
+// pane's own error.
+func (m *Manager) WriteToFocused(b []byte) (int, error) {
+	p := m.Focused()
+	if p == nil {
+		return 0, nil
+	}
+	return p.Write(b)
+}
+
 // Focused returns the focused pane, or nil if none is focused.
 func (m *Manager) Focused() *Pane {
 	m.mu.Lock()

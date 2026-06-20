@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -12,12 +13,26 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/squashbox/squash-ide/internal/config"
 	"github.com/squashbox/squash-ide/internal/dispatch"
+	"github.com/squashbox/squash-ide/internal/pane"
 	"github.com/squashbox/squash-ide/internal/spawner"
 	"github.com/squashbox/squash-ide/internal/status"
 	"github.com/squashbox/squash-ide/internal/task"
 	"github.com/squashbox/squash-ide/internal/tmux"
 	"github.com/squashbox/squash-ide/internal/vault"
 )
+
+// uiDebug gates the native-engine debug trace (focus changes) on SQUASH_DEBUG,
+// matching the pane package's gate so a single env var lights up the whole
+// native engine's lifecycle logging. Resize traces come from the pane manager
+// itself; this covers the UI-side focus toggle.
+var uiDebug = os.Getenv("SQUASH_DEBUG") != ""
+
+func uidebugf(format string, args ...any) {
+	if !uiDebug {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "squash-ide debug: ui: "+format+"\n", args...)
+}
 
 // view represents which screen the user is on.
 type view int
@@ -84,6 +99,15 @@ type Model struct {
 	needsRespawn      bool              // true until the first task load triggers respawn
 	RespawnFunc       func([]task.Task) // called once after first load to respawn active panes
 
+	// Native engine (T-038). engineNative gates every native-mode branch;
+	// when false the model behaves exactly as the tmux build. manager is the
+	// in-process pane authority (nil in tmux mode). paneFocused is the focus
+	// owner: when true, keystrokes route to the focused pane's child instead of
+	// being interpreted as list commands.
+	engineNative bool
+	manager      paneManager
+	paneFocused  bool
+
 	// MCP status polling
 	subStatuses map[string]status.File // keyed by task ID
 
@@ -99,13 +123,19 @@ type Model struct {
 	statusIsErr  bool         // whether statusMsg is an error
 }
 
-// New creates a new Model from the resolved config.
+// New creates a new Model from the resolved config. In native-engine mode it
+// also constructs the in-process pane manager the right region renders.
 func New(cfg config.Config) Model {
-	return Model{
+	m := Model{
 		cfg:          cfg,
 		vaultPath:    cfg.Vault,
 		needsRespawn: true,
 	}
+	if cfg.Engine == config.EngineNative {
+		m.engineNative = true
+		m.manager = pane.NewManager()
+	}
+	return m
 }
 
 // NewForTest constructs a Model pre-loaded with tasks and status entries,
@@ -125,9 +155,15 @@ func NewForTest(cfg config.Config, tasks []task.Task, statuses map[string]status
 	return m
 }
 
-// Init loads tasks from the vault and starts the status polling ticker.
+// Init loads tasks from the vault and starts the status polling ticker. In
+// native mode it also begins listening for pane output so the right region
+// repaints when a child writes.
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.loadTasks, m.tickStatus())
+	cmds := []tea.Cmd{m.loadTasks, m.tickStatus()}
+	if m.engineNative {
+		cmds = append(cmds, m.waitForPaneOutput())
+	}
+	return tea.Batch(cmds...)
 }
 
 type tasksLoadedMsg struct {
@@ -159,6 +195,11 @@ type deactivateDoneMsg struct {
 type statusTickMsg struct {
 	statuses map[string]status.File
 }
+
+// paneOutputMsg is emitted (native mode) when the pane manager signals output
+// or a state change. Its only job is to trigger a re-View; the handler
+// re-arms waitForPaneOutput for the next signal.
+type paneOutputMsg struct{}
 
 type logTaskDoneMsg struct{}
 
@@ -282,6 +323,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.view == detailView {
 			m.updateDetailContent()
 		}
+		// Native mode reflows the in-process pane region; it never shells out
+		// to tmux for sizing. Manager.Resize swallows a layout reject (keeps
+		// the last good geometry), so this is crash-safe on shrink.
+		if m.engineNative {
+			m.manager.Resize(m.rightRegion())
+			return m, nil
+		}
 		// Synchronous "too narrow" check — zoom/unzoom the TUI pane to
 		// show a full-screen overlay when the terminal can't fit all panes.
 		// Compact-mode check piggybacks on the same tmux call path.
@@ -306,7 +354,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.clampCursor()
 		// Active count may have changed (dispatch / complete / deactivate /
 		// block all route through loadTasks) — re-evaluate compact mode.
-		if tmux.InSession() {
+		// Native mode owns its own layout and never touches tmux here.
+		if !m.engineNative && tmux.InSession() {
 			m.checkCompactPane(tmux.CurrentPaneID())
 		}
 		// On the first load, respawn tmux panes for active tasks (or
@@ -369,6 +418,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusIsErr = true
 		return m, nil
 
+	case paneOutputMsg:
+		// A pane produced output / changed state; returning the model triggers
+		// a re-View. Re-arm the listener for the next signal.
+		return m, m.waitForPaneOutput()
+
 	case statusTickMsg:
 		old := m.subStatuses
 		m.subStatuses = msg.statuses
@@ -380,7 +434,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// live status report" means. Without the old-present / new-absent
 		// branch, the pane border would silently retain its last-painted
 		// format past the staleness horizon and diverge from the list badge.
-		if tmux.InSession() {
+		//
+		// Native mode skips the tmux border sync entirely — pane badges are
+		// painted by the manager from the same status states.
+		if !m.engineNative && tmux.InSession() {
 			tuiPane := tmux.CurrentPaneID()
 			for _, t := range m.allTasks {
 				if t.Status != "active" {
@@ -420,7 +477,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// expands back to normal while dialogs render and re-shrinks
 		// once they close.
 		if updated, ok := newModel.(Model); ok {
-			if tmux.InSession() {
+			if !updated.engineNative && tmux.InSession() {
 				updated.checkCompactPane(tmux.CurrentPaneID())
 				updated.checkFormZoom()
 			}
@@ -469,8 +526,36 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleDetailKey(msg)
 	}
 
+	// Native pane focus: when the pane region owns focus, keystrokes route to
+	// the focused child instead of the list. Reached only after the modal /
+	// form / filter / detail checks above, so a dialog always wins.
+	if m.engineNative && m.paneFocused {
+		return m.handlePaneFocusedKey(msg)
+	}
+
 	// List view
 	return m.handleListKey(msg)
+}
+
+// handlePaneFocusedKey routes a keystroke to the focused pane's child while the
+// pane region owns focus. The focus-toggle key returns focus to the list and is
+// never forwarded; ctrl+c always quits so the user is never trapped typing into
+// a pane. Everything else is re-encoded (pane.EncodeKey) and written to the
+// child's PTY — unmapped keys (function keys, etc.) are dropped, matching the
+// encoder's documented gaps.
+func (m Model) handlePaneFocusedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if key.Matches(msg, keys.PaneFocus) {
+		m.paneFocused = false
+		uidebugf("focus -> list")
+		return m, nil
+	}
+	if msg.Type == tea.KeyCtrlC {
+		return m, tea.Quit
+	}
+	if b := pane.EncodeKey(msg); b != nil && m.manager != nil {
+		_, _ = m.manager.WriteToFocused(b)
+	}
+	return m, nil
 }
 
 func (m Model) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -638,6 +723,14 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, keys.Quit):
 		return m, tea.Quit
+
+	case m.engineNative && key.Matches(msg, keys.PaneFocus):
+		// Hand focus to the native pane region. Subsequent keys forward to the
+		// focused child until toggled back. (With zero panes the region is the
+		// placeholder and writes are no-ops until T-039 wires spawning.)
+		m.paneFocused = true
+		uidebugf("focus -> pane")
+		return m, nil
 
 	case key.Matches(msg, keys.Up):
 		m.moveCursor(-1)
@@ -953,6 +1046,12 @@ func (m Model) View() string {
 		return fmt.Sprintf("\n  Error: %v\n\n  Press q to quit.\n", m.err)
 	}
 
+	// Native engine composes the list + pane region itself (and its own
+	// too-narrow overlay); it never uses the tmux tooNarrow/compact path.
+	if m.engineNative {
+		return m.nativeView()
+	}
+
 	if m.tooNarrow {
 		activeCount := 0
 		for _, t := range m.allTasks {
@@ -1099,6 +1198,10 @@ func (m Model) listViewRender() string {
 		b.WriteString(helpLineCompact(m.filterActive, m.filter != ""))
 	case m.filterActive:
 		b.WriteString(helpStyle.Render("[enter] apply  [esc] clear  [type] filter"))
+	case m.engineNative && m.paneFocused:
+		b.WriteString(helpStyle.Render("pane focus — keys go to the task  [ctrl+w] back to list  [ctrl+c] quit"))
+	case m.engineNative:
+		b.WriteString(helpStyle.Render("j/k nav  enter spawn  ctrl+w focus pane  t new  c complete  d deactivate  b block  tab detail  / filter  r refresh  q quit"))
 	default:
 		b.WriteString(helpStyle.Render("j/k nav  enter spawn  t new  c complete  d deactivate  b block  tab detail  / filter  r refresh  q quit"))
 	}
