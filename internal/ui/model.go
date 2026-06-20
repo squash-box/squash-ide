@@ -107,6 +107,7 @@ type Model struct {
 	engineNative bool
 	manager      paneManager
 	paneFocused  bool
+	layoutName   string // active native layout name (T-040); cycled by the 'L' key
 
 	// MCP status polling
 	subStatuses map[string]status.File // keyed by task ID
@@ -133,7 +134,11 @@ func New(cfg config.Config) Model {
 	}
 	if cfg.Engine == config.EngineNative {
 		m.engineNative = true
-		m.manager = pane.NewManager()
+		m.layoutName = cfg.Layout
+		m.manager = pane.NewManager(
+			pane.WithStrategy(pane.StrategyForName(cfg.Layout)),
+			pane.WithFocusFollowsInput(cfg.FocusFollowsInput),
+		)
 	}
 	return m
 }
@@ -500,17 +505,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// (the [[T-023]] invariant); leave a never-seen task on its spawn-time
 		// "working" badge rather than painting idle before claude's first report.
 		if m.engineNative {
+			// Advance the input_required badge-blink phase on every tick (T-040).
+			m.manager.Tick()
 			for _, t := range m.allTasks {
 				if t.Status != "active" {
 					continue
 				}
 				newSub, newOK := msg.statuses[t.ID]
-				_, oldOK := old[t.ID]
+				oldSub, oldOK := old[t.ID]
 				switch {
 				case newOK:
 					m.manager.SetStateByTask(t.ID, newSub.State)
 				case oldOK:
 					m.manager.SetStateByTask(t.ID, pane.StateIdle)
+				}
+				// Focus-follows-input (T-040): when a pane transitions into
+				// input_required, surface it in the TUI — the in-TUI dual of the
+				// [[T-034]] notification click. Gated on the transition (old state
+				// != input_required) so the user can toggle back to the list
+				// without focus being yanked every tick while the pane waits. The
+				// manager also focuses the pane; here we flip the UI's focus owner
+				// so keystrokes route to it, idempotent with the notify-click path.
+				if m.cfg.FocusFollowsInput && newOK && newSub.State == pane.StateInputRequired {
+					wasInput := oldOK && oldSub.State == pane.StateInputRequired
+					if !wasInput {
+						if err := m.manager.FocusByTask(t.ID); err == nil {
+							m.paneFocused = true
+							uidebugf("focus-follows-input -> %s", t.ID)
+						}
+					}
 				}
 			}
 			if msg.focusTaskID != "" {
@@ -657,6 +680,20 @@ func (m *Model) closeNativePane(taskID string) {
 	}
 	_ = m.manager.CloseByTask(taskID)
 	m.paneFocused = false
+}
+
+// cycleLayout advances the native pane layout columns→stack→tabs→responsive→
+// columns and swaps the manager's strategy to match. A no-op in tmux mode. The
+// status bar reports the new layout so the change is visible even with no panes.
+func (m *Model) cycleLayout() {
+	if !m.engineNative || m.manager == nil {
+		return
+	}
+	m.layoutName = pane.NextLayoutName(m.layoutName)
+	m.manager.SetStrategy(pane.StrategyForName(m.layoutName))
+	m.statusMsg = "layout: " + m.layoutName
+	m.statusIsErr = false
+	uidebugf("layout cycle -> %s", m.layoutName)
 }
 
 func (m Model) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -847,6 +884,23 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// placeholder and writes are no-ops until T-039 wires spawning.)
 		m.paneFocused = true
 		uidebugf("focus -> pane")
+		return m, nil
+
+	case m.engineNative && key.Matches(msg, keys.CycleLayout):
+		m.cycleLayout()
+		return m, nil
+
+	case m.engineNative && key.Matches(msg, keys.NextTab):
+		m.manager.FocusNext()
+		return m, nil
+
+	case m.engineNative && key.Matches(msg, keys.PrevTab):
+		m.manager.FocusPrev()
+		return m, nil
+
+	case m.engineNative && key.Matches(msg, keys.Collapse):
+		m.manager.ToggleCollapseFocused()
+		uidebugf("collapse toggled")
 		return m, nil
 
 	case key.Matches(msg, keys.Up):
@@ -1318,7 +1372,7 @@ func (m Model) listViewRender() string {
 	case m.engineNative && m.paneFocused:
 		b.WriteString(helpStyle.Render("pane focus — keys go to the task  [ctrl+w] back to list  [ctrl+c] quit"))
 	case m.engineNative:
-		b.WriteString(helpStyle.Render("j/k nav  enter spawn  ctrl+w focus pane  t new  c complete  d deactivate  b block  tab detail  / filter  r refresh  q quit"))
+		b.WriteString(helpStyle.Render("j/k nav  enter spawn  ctrl+w pane  L layout  [/] tabs  z collapse  t new  c done  d deact  b block  / filter  q quit"))
 	default:
 		b.WriteString(helpStyle.Render("j/k nav  enter spawn  t new  c complete  d deactivate  b block  tab detail  / filter  r refresh  q quit"))
 	}

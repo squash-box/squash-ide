@@ -13,9 +13,26 @@ vault: ~/GIT/agentic/tasks/personal
 #   tmux   (default) bootstraps a tmux session and tiles spawned task panes
 #          to the right of the TUI — the shipping workflow.
 #   native renders an in-process pane region inside the TUI with no tmux
-#          dependency. Opt-in / experimental: the region is currently an
-#          empty placeholder (spawning tasks into it lands in a later task).
+#          dependency. Opt-in / experimental: spawns Claude into native panes
+#          with responsive layouts (see `layout` / `focus_follows_input`).
 engine: tmux
+
+# Native-engine pane layout strategy (T-040). Ignored under engine: tmux.
+# Env: SQUASH_LAYOUT. Flag: --layout.
+#   columns     equal vertical columns (the tmux-tiling port); rejects a spawn
+#               that would force any pane below its minimum width.
+#   stack       panes stacked as full-width rows.
+#   tabs        one pane full-region; the rest shown as a tab strip ([ ] cycle).
+#   responsive  (default) auto-reflows columns→stack→tabs as the region shrinks,
+#               so a spawn never hard-rejects on a narrow terminal.
+layout: responsive
+
+# Native-engine focus-follows-input (T-040). Ignored under engine: tmux.
+# Env: SQUASH_FOCUS_FOLLOWS_INPUT. Flag: --focus-follows-input.
+# When true, a pane that enters input_required auto-surfaces in the TUI (the
+# in-TUI dual of the desktop-notification click). Set false to keep focus put
+# and only paint the input badge.
+focus_follows_input: true
 
 terminal:
   # Terminal emulator command used when --no-tmux is active. Empty lets

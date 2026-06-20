@@ -255,6 +255,45 @@ still completes cleanly.
 daily surface. The two engines are independent of `--no-tmux`, which only
 affects the `tmux` engine's fallback to OS windows.
 
+#### Layouts (native engine)
+
+Owning the layout in-process is the payoff the native engine was built for:
+where tmux only tiled equal columns and *rejected* a spawn that wouldn't fit,
+the native engine **reflows** so a spawn always lands. The active layout is
+chosen by the `layout` config key (`--layout` flag / `SQUASH_LAYOUT` env):
+
+| `layout`               | Behaviour                                                       |
+|------------------------|----------------------------------------------------------------|
+| `columns`              | Equal vertical columns (the tmux-tiling port). Rejects a spawn that would force any pane below its minimum width — the one mode that can still say "no". |
+| `stack`                | Panes stacked as full-width rows. |
+| `tabs`                 | One pane fills the region; the rest live in a tab strip you cycle with `[` / `]`. |
+| `responsive` (default) | Auto-reflows **columns → stack → tabs** as the region shrinks, so a spawn never hard-rejects on a narrow terminal. |
+
+This makes the tmux-era [compact mode](#compact-mode--narrow-terminals)
+unnecessary under `engine: native` — the responsive strategy claws back space
+by reflowing rather than by shrinking the task list, and a narrow terminal tabs
+instead of erroring.
+
+Keyboard controls (list mode, native engine only):
+
+| Key   | Action                                                  |
+|-------|---------------------------------------------------------|
+| `L`   | cycle layout (columns → stack → tabs → responsive → …)  |
+| `]`   | focus next tab/pane                                      |
+| `[`   | focus previous tab/pane                                  |
+| `z`   | collapse / expand the focused pane to a thin strip       |
+
+**Focus-follows-input.** With `focus_follows_input: true` (the default,
+`--focus-follows-input` flag / `SQUASH_FOCUS_FOLLOWS_INPUT` env), a pane that
+enters `input_required` auto-surfaces in the TUI — the in-TUI dual of the
+[`input_required` notification click](#hooks-claude-code-push-based-status), and
+idempotent with it. Set it `false` to keep focus where it is and only paint the
+emphasized (animated) `input_required` badge, which agrees with the list badge.
+
+```bash
+squash-ide --engine native --layout responsive --focus-follows-input true
+```
+
 ### List tasks (JSON)
 
 ```bash
@@ -325,6 +364,8 @@ Default config path: `$XDG_CONFIG_HOME/squash-ide/config.yaml` (usually
 ```yaml
 vault: ~/GIT/agentic/tasks/personal
 engine: tmux        # tmux (default) | native (experimental, see Engine above)
+layout: responsive  # native only: columns | stack | tabs | responsive (default)
+focus_follows_input: true  # native only: auto-surface a pane needing input
 terminal:
   command: ""      # empty = auto-detect ptyxis → gnome-terminal → x-terminal-emulator
   args: ["--working-directory={cwd}", "--", "bash", "-c", "{exec}"]
@@ -344,6 +385,8 @@ Environment variables (override file):
 |--------------------|----------------------------------------|
 | `SQUASH_VAULT`     | vault directory                        |
 | `SQUASH_ENGINE`    | window-management engine (`tmux`/`native`) |
+| `SQUASH_LAYOUT`    | native pane layout (`columns`/`stack`/`tabs`/`responsive`) |
+| `SQUASH_FOCUS_FOLLOWS_INPUT` | native: auto-focus a pane needing input (`true`/`false`) |
 | `SQUASH_TERMINAL`  | terminal emulator command              |
 | `SQUASH_SPAWN_CMD` | command to run inside spawned terminal |
 
@@ -353,6 +396,8 @@ CLI flags (override env):
 |---------------------|-------------------------------------|
 | `--vault`           | vault directory                     |
 | `--engine`          | window-management engine (`tmux`/`native`) |
+| `--layout`          | native pane layout (`columns`/`stack`/`tabs`/`responsive`) |
+| `--focus-follows-input` | native: auto-focus a pane needing input (`true`/`false`) |
 | `--terminal`        | terminal emulator command           |
 | `--spawn-cmd`       | command to run inside spawned terminal |
 | `--no-tmux`         | disable tmux tiled-pane mode        |

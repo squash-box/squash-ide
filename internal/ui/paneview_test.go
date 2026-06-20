@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/squashbox/squash-ide/internal/config"
 	"github.com/squashbox/squash-ide/internal/pane"
+	"github.com/squashbox/squash-ide/internal/status"
 	"github.com/squashbox/squash-ide/internal/task"
 )
 
@@ -28,6 +29,13 @@ type stubManager struct {
 	focusedTask string
 	states      map[string]string // taskID -> last state set
 	canSpawn    bool
+
+	// T-040 layout-control recording.
+	strategy        pane.Strategy
+	focusNextCount  int
+	focusPrevCount  int
+	collapseToggles int
+	ticks           int
 }
 
 func newStubManager() *stubManager {
@@ -70,6 +78,12 @@ func (s *stubManager) FocusByTask(taskID string) error {
 func (s *stubManager) SetStateByTask(taskID, state string) { s.states[taskID] = state }
 
 func (s *stubManager) CanSpawn() bool { return s.canSpawn }
+
+func (s *stubManager) SetStrategy(st pane.Strategy) { s.strategy = st }
+func (s *stubManager) FocusNext()                   { s.focusNextCount++ }
+func (s *stubManager) FocusPrev()                   { s.focusPrevCount++ }
+func (s *stubManager) ToggleCollapseFocused()       { s.collapseToggles++ }
+func (s *stubManager) Tick()                        { s.ticks++ }
 
 // nativeModel builds a native-engine Model wired to a stub manager, pre-loaded
 // with tasks and a default size, ready to drive through Update/View directly.
@@ -262,6 +276,115 @@ func TestNativeView_TooNarrow(t *testing.T) {
 	if strings.Contains(view, "PANE-REGION-SENTINEL") {
 		t.Error("too-narrow overlay should not render the pane region")
 	}
+}
+
+// 'L' cycles the layout and swaps the manager's strategy. Default is responsive
+// (config default), so the first 'L' advances to columns.
+func TestNativeCycleLayout(t *testing.T) {
+	mgr := newStubManager()
+	m := nativeModel(t, mgr)
+	if m.layoutName != config.LayoutResponsive {
+		t.Fatalf("initial layout = %q, want responsive", m.layoutName)
+	}
+
+	out, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("L")})
+	m = out.(Model)
+
+	if m.layoutName != config.LayoutColumns {
+		t.Errorf("after L, layout = %q, want columns", m.layoutName)
+	}
+	if mgr.strategy == nil {
+		t.Error("L should have called SetStrategy on the manager")
+	}
+}
+
+// '[' and ']' drive prev/next-tab (FocusPrev/FocusNext); 'z' toggles collapse.
+func TestNativeTabAndCollapseKeys(t *testing.T) {
+	mgr := newStubManager()
+	m := nativeModel(t, mgr)
+
+	out, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("]")})
+	m = out.(Model)
+	out, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("[")})
+	m = out.(Model)
+	out, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("z")})
+	m = out.(Model)
+
+	if mgr.focusNextCount != 1 {
+		t.Errorf("] -> FocusNext count = %d, want 1", mgr.focusNextCount)
+	}
+	if mgr.focusPrevCount != 1 {
+		t.Errorf("[ -> FocusPrev count = %d, want 1", mgr.focusPrevCount)
+	}
+	if mgr.collapseToggles != 1 {
+		t.Errorf("z -> ToggleCollapseFocused count = %d, want 1", mgr.collapseToggles)
+	}
+}
+
+// The native status tick advances the badge-blink phase via manager.Tick.
+func TestNativeStatusTick_AdvancesBlink(t *testing.T) {
+	mgr := newStubManager()
+	m := nativeModel(t, mgr)
+
+	out, _ := m.Update(statusTickMsg{statuses: map[string]status.File{}})
+	_ = out.(Model)
+
+	if mgr.ticks == 0 {
+		t.Error("native status tick should call manager.Tick for the badge blink")
+	}
+}
+
+// Focus-follows-input: a status tick that reports input_required for an active
+// task surfaces its pane (focus + the UI's pane-focus owner). With it disabled,
+// the pane is not surfaced.
+func TestNativeFocusFollowsInput(t *testing.T) {
+	t.Run("enabled", func(t *testing.T) {
+		mgr := newStubManager()
+		m := nativeModel(t, mgr) // config.Defaults() -> FocusFollowsInput true
+
+		out, _ := m.Update(statusTickMsg{statuses: map[string]status.File{
+			"T-003": {TaskID: "T-003", State: pane.StateInputRequired},
+		}})
+		m = out.(Model)
+
+		if mgr.focusedTask != "T-003" {
+			t.Errorf("focus-follows-input should focus T-003, got %q", mgr.focusedTask)
+		}
+		if !m.paneFocused {
+			t.Error("focus-follows-input should hand the UI focus to the pane region")
+		}
+	})
+
+	t.Run("disabled", func(t *testing.T) {
+		mgr := newStubManager()
+		cfg := config.Defaults()
+		cfg.Engine = config.EngineNative
+		cfg.Vault = "/fake/vault"
+		cfg.FocusFollowsInput = false
+		m := New(cfg)
+		m.manager = mgr
+		m.allTasks = testTasks()
+		m.width = 200
+		m.height = 50
+		m.buildItems()
+		m.applyFilter()
+
+		out, _ := m.Update(statusTickMsg{statuses: map[string]status.File{
+			"T-003": {TaskID: "T-003", State: pane.StateInputRequired},
+		}})
+		m = out.(Model)
+
+		if mgr.focusedTask != "" {
+			t.Errorf("ffi disabled: should not focus a pane, got %q", mgr.focusedTask)
+		}
+		if m.paneFocused {
+			t.Error("ffi disabled: should not steal the UI focus")
+		}
+		// The badge is still updated from the status pipeline.
+		if mgr.states["T-003"] != pane.StateInputRequired {
+			t.Errorf("badge state = %q, want input_required", mgr.states["T-003"])
+		}
+	})
 }
 
 // paneOutputMsg re-arms the repaint listener and triggers a re-render.

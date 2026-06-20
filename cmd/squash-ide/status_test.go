@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/squashbox/squash-ide/internal/status"
+	"github.com/squashbox/squash-ide/internal/testutil/fakerunner"
 )
 
 // statusTempDir redirects the status package's output directory to a fresh
@@ -23,6 +24,24 @@ func statusTempDir(t *testing.T) string {
 	restoreNotify := status.SetNotifyDirForTesting(filepath.Join(root, "notify"))
 	t.Cleanup(restoreStatus)
 	t.Cleanup(restoreNotify)
+
+	// Stub the notify exec seam. An input_required transition calls
+	// status.NotifyInputRequired, which fork-and-detaches os.Executable() with
+	// a "notify-watch" arg. Under `go test`, os.Executable() IS this test
+	// binary, and a test binary ignores positional args and re-runs the WHOLE
+	// suite — which hits the input_required tests again and forks once more:
+	// an exponential fork bomb that OOMs the machine (it surfaces as
+	// `make test-unit` exhausting RAM even at -p 2). Pointing NotifyRunner at a
+	// fakerunner keeps the fork from ever happening; AllowUnexpected lets tests
+	// that don't care about the notify call ignore it without wiring an
+	// expectation. Production is unaffected: there os.Executable() is the real
+	// squash-ide binary and `notify-watch` is a genuine subcommand.
+	fr := fakerunner.New(t)
+	fr.AllowUnexpected = true
+	prevRunner := status.NotifyRunner
+	status.NotifyRunner = fr
+	t.Cleanup(func() { status.NotifyRunner = prevRunner })
+
 	return filepath.Join(root, "status")
 }
 

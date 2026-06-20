@@ -54,6 +54,19 @@ const (
 	EngineNative = "native"
 )
 
+// Layout names for the native engine's pane region (T-040). They select the
+// layout Strategy: equal columns, stacked rows, tabs, or the responsive auto-
+// mode that reflows columns→stack→tabs as the region shrinks (so a spawn never
+// hard-rejects). These literals mirror pane.Layout* / pane.StrategyForName; they
+// are duplicated here (rather than importing pane) to keep config free of the
+// pane package's PTY dependencies, the same way the status strings are mirrored.
+const (
+	LayoutColumns    = "columns"
+	LayoutStack      = "stack"
+	LayoutTabs       = "tabs"
+	LayoutResponsive = "responsive"
+)
+
 // Tmux controls the v2 single-terminal tiled-pane workflow (T-011).
 // When Enabled, squash-ide bootstraps a tmux session and opens spawned tasks
 // as new panes to the right of the TUI instead of new OS terminal windows.
@@ -73,9 +86,17 @@ type Config struct {
 	Spawn    Spawn    `yaml:"spawn"`
 	Tmux     Tmux     `yaml:"tmux"`
 
+	// Layout selects the native engine's pane layout strategy (T-040), one of
+	// the Layout* constants. Default "responsive". Ignored under engine: tmux.
+	Layout string `yaml:"layout"`
+	// FocusFollowsInput, when true, auto-surfaces a native pane that enters
+	// input_required (the in-TUI dual of the [[T-034]] notification click).
+	// Ignored under engine: tmux.
+	FocusFollowsInput bool `yaml:"focus_follows_input"`
+
 	// Sources records the provenance of each resolved field.
-	// Keys: "vault", "engine", "terminal.command", "terminal.args",
-	// "spawn.command", "spawn.args",
+	// Keys: "vault", "engine", "layout", "focus_follows_input",
+	// "terminal.command", "terminal.args", "spawn.command", "spawn.args",
 	// "tmux.enabled", "tmux.session_name", "tmux.tui_width", "tmux.min_pane_width".
 	Sources map[string]Source `yaml:"-"`
 
@@ -88,8 +109,13 @@ type Config struct {
 type Overrides struct {
 	Vault    string
 	Engine   string
+	Layout   string
 	Terminal string
 	SpawnCmd string
+
+	// FocusFollowsInput is a tri-state flag: nil = not provided (config/env/
+	// default wins), non-nil = forced to the pointed-at value.
+	FocusFollowsInput *bool
 
 	// Tmux flag overrides. --no-tmux is presence-only: true forces tmux off,
 	// absence (false) is a no-op (config/env still wins).
@@ -107,8 +133,10 @@ type Overrides struct {
 // flag provides a value.
 func Defaults() Config {
 	return Config{
-		Vault:  "~/GIT/agentic/tasks/personal/",
-		Engine: EngineTmux,
+		Vault:             "~/GIT/agentic/tasks/personal/",
+		Engine:            EngineTmux,
+		Layout:            LayoutResponsive,
+		FocusFollowsInput: true,
 		Terminal: Terminal{
 			// Empty = auto-detect (preserves T-007's terminal detection).
 			Command: "",
@@ -128,6 +156,8 @@ func Defaults() Config {
 		Sources: map[string]Source{
 			"vault":               SourceDefault,
 			"engine":              SourceDefault,
+			"layout":              SourceDefault,
+			"focus_follows_input": SourceDefault,
 			"terminal.command":    SourceDefault,
 			"terminal.args":       SourceDefault,
 			"spawn.command":       SourceDefault,
@@ -180,6 +210,14 @@ func Load(ov Overrides) (Config, error) {
 			cfg.Engine, source(cfg, "engine"), EngineTmux, EngineNative)
 	}
 
+	// Validate the resolved layout the same way (T-040) — an unknown strategy
+	// fails at load with the allowed set, mirroring the engine check.
+	if !validLayout(cfg.Layout) {
+		return Config{}, fmt.Errorf("invalid layout %q (%s): must be one of %q, %q, %q, %q",
+			cfg.Layout, source(cfg, "layout"),
+			LayoutColumns, LayoutStack, LayoutTabs, LayoutResponsive)
+	}
+
 	// If no layer supplied an explicit tmux.session_name, derive one from the
 	// resolved vault so each vault gets its own tmux session and two concurrent
 	// squash-ide instances pointing at different vaults don't collide.
@@ -226,11 +264,13 @@ type fileTmux struct {
 // fileConfig is the parse-only shape of the YAML file. It mirrors Config
 // but uses pointers / sentinel zeros where needed for presence detection.
 type fileConfig struct {
-	Vault    string    `yaml:"vault"`
-	Engine   string    `yaml:"engine"`
-	Terminal Terminal  `yaml:"terminal"`
-	Spawn    Spawn     `yaml:"spawn"`
-	Tmux     *fileTmux `yaml:"tmux"`
+	Vault             string    `yaml:"vault"`
+	Engine            string    `yaml:"engine"`
+	Layout            string    `yaml:"layout"`
+	FocusFollowsInput *bool     `yaml:"focus_follows_input"`
+	Terminal          Terminal  `yaml:"terminal"`
+	Spawn             Spawn     `yaml:"spawn"`
+	Tmux              *fileTmux `yaml:"tmux"`
 }
 
 // applyFile reads the YAML config at path (if it exists) and overlays its
@@ -257,6 +297,14 @@ func applyFile(cfg *Config, path string) error {
 	if fc.Engine != "" {
 		cfg.Engine = fc.Engine
 		cfg.Sources["engine"] = SourceFile
+	}
+	if fc.Layout != "" {
+		cfg.Layout = fc.Layout
+		cfg.Sources["layout"] = SourceFile
+	}
+	if fc.FocusFollowsInput != nil {
+		cfg.FocusFollowsInput = *fc.FocusFollowsInput
+		cfg.Sources["focus_follows_input"] = SourceFile
 	}
 	if fc.Terminal.Command != "" {
 		cfg.Terminal.Command = fc.Terminal.Command
@@ -309,6 +357,14 @@ func applyEnv(cfg *Config) {
 		cfg.Engine = v
 		cfg.Sources["engine"] = SourceEnv
 	}
+	if v := os.Getenv("SQUASH_LAYOUT"); v != "" {
+		cfg.Layout = v
+		cfg.Sources["layout"] = SourceEnv
+	}
+	if v := os.Getenv("SQUASH_FOCUS_FOLLOWS_INPUT"); v != "" {
+		cfg.FocusFollowsInput = isTruthy(v)
+		cfg.Sources["focus_follows_input"] = SourceEnv
+	}
 	if v := os.Getenv("SQUASH_TERMINAL"); v != "" {
 		cfg.Terminal.Command = v
 		cfg.Sources["terminal.command"] = SourceEnv
@@ -328,6 +384,14 @@ func applyOverrides(cfg *Config, ov Overrides) {
 	if ov.Engine != "" {
 		cfg.Engine = ov.Engine
 		cfg.Sources["engine"] = SourceFlag
+	}
+	if ov.Layout != "" {
+		cfg.Layout = ov.Layout
+		cfg.Sources["layout"] = SourceFlag
+	}
+	if ov.FocusFollowsInput != nil {
+		cfg.FocusFollowsInput = *ov.FocusFollowsInput
+		cfg.Sources["focus_follows_input"] = SourceFlag
 	}
 	if ov.Terminal != "" {
 		cfg.Terminal.Command = ov.Terminal
@@ -389,6 +453,8 @@ func (c Config) Format() string {
 	}
 	fmt.Fprintf(&b, "vault: %s (from %s)\n", c.Vault, source(c, "vault"))
 	fmt.Fprintf(&b, "engine: %s (from %s)\n", c.Engine, source(c, "engine"))
+	fmt.Fprintf(&b, "layout: %s (from %s)\n", c.Layout, source(c, "layout"))
+	fmt.Fprintf(&b, "focus_follows_input: %t (from %s)\n", c.FocusFollowsInput, source(c, "focus_follows_input"))
 	fmt.Fprintf(&b, "terminal.command: %s (from %s)\n", terminalCommandDisplay(c), source(c, "terminal.command"))
 	fmt.Fprintf(&b, "terminal.args: %v (from %s)\n", c.Terminal.Args, source(c, "terminal.args"))
 	fmt.Fprintf(&b, "spawn.command: %s (from %s)\n", c.Spawn.Command, source(c, "spawn.command"))
@@ -406,6 +472,28 @@ func terminalCommandDisplay(c Config) string {
 		return "(auto-detect)"
 	}
 	return c.Terminal.Command
+}
+
+// validLayout reports whether name is one of the recognised native layouts.
+func validLayout(name string) bool {
+	switch name {
+	case LayoutColumns, LayoutStack, LayoutTabs, LayoutResponsive:
+		return true
+	default:
+		return false
+	}
+}
+
+// isTruthy parses a boolean-ish env var value. Anything other than the usual
+// false spellings is treated as true, so SQUASH_FOCUS_FOLLOWS_INPUT=1/yes/on
+// all enable it.
+func isTruthy(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "0", "false", "no", "off":
+		return false
+	default:
+		return true
+	}
 }
 
 func source(c Config, key string) Source {

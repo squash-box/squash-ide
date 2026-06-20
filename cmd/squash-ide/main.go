@@ -33,6 +33,8 @@ var (
 	flagInTmux       bool // internal: marks "we already wrapped ourselves in tmux"
 	flagTUIWidth     int
 	flagMinPaneWidth int
+	flagLayout       string
+	flagFFI          string // native focus-follows-input tri-state: "" unset, else true/false
 )
 
 func main() {
@@ -46,6 +48,8 @@ func main() {
 
 	rootCmd.PersistentFlags().StringVar(&flagVault, "vault", "", "path to the Obsidian vault (overrides config file and env)")
 	rootCmd.PersistentFlags().StringVar(&flagEngine, "engine", "", "window-management engine: tmux (default) or native (overrides config file and env)")
+	rootCmd.PersistentFlags().StringVar(&flagLayout, "layout", "", "native pane layout: columns, stack, tabs, or responsive (default) (overrides config file and env)")
+	rootCmd.PersistentFlags().StringVar(&flagFFI, "focus-follows-input", "", "native: auto-focus a pane that needs input — true or false (overrides config file and env)")
 	rootCmd.PersistentFlags().StringVar(&flagTerminal, "terminal", "", "terminal emulator command (overrides config file and env)")
 	rootCmd.PersistentFlags().StringVar(&flagSpawnCmd, "spawn-cmd", "", "command to run inside spawned terminal (overrides config file and env)")
 	rootCmd.PersistentFlags().BoolVar(&flagNoTmux, "no-tmux", false, "disable tmux tiled-pane mode; spawn each task in its own OS terminal window")
@@ -139,14 +143,25 @@ to backlog, updates board/log, tears down the tmux pane).`,
 
 // loadConfig resolves the config, applying CLI flags on top of env and file.
 func loadConfig() (config.Config, error) {
+	var ffi *bool
+	switch strings.ToLower(strings.TrimSpace(flagFFI)) {
+	case "true", "1", "yes", "on":
+		t := true
+		ffi = &t
+	case "false", "0", "no", "off":
+		f := false
+		ffi = &f
+	}
 	return config.Load(config.Overrides{
-		Vault:        flagVault,
-		Engine:       flagEngine,
-		Terminal:     flagTerminal,
-		SpawnCmd:     flagSpawnCmd,
-		NoTmux:       flagNoTmux,
-		TUIWidth:     flagTUIWidth,
-		MinPaneWidth: flagMinPaneWidth,
+		Vault:             flagVault,
+		Engine:            flagEngine,
+		Layout:            flagLayout,
+		FocusFollowsInput: ffi,
+		Terminal:          flagTerminal,
+		SpawnCmd:          flagSpawnCmd,
+		NoTmux:            flagNoTmux,
+		TUIWidth:          flagTUIWidth,
+		MinPaneWidth:      flagMinPaneWidth,
 	})
 }
 

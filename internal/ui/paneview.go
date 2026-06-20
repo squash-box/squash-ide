@@ -39,6 +39,19 @@ type paneManager interface {
 	SetStateByTask(taskID, state string)
 	// CanSpawn reports whether the region admits one more pane (spawn pre-flight).
 	CanSpawn() bool
+
+	// T-040 responsive-layout surface — runtime layout controls and the badge
+	// animation tick.
+
+	// SetStrategy swaps the active layout strategy (cycle-layout keybinding).
+	SetStrategy(s pane.Strategy)
+	// FocusNext / FocusPrev cycle the focused pane — also next/prev tab under Tabs.
+	FocusNext()
+	FocusPrev()
+	// ToggleCollapseFocused collapses/expands the focused (or first) pane.
+	ToggleCollapseFocused()
+	// Tick advances the input_required badge-blink phase.
+	Tick()
 }
 
 // paneGutter is the blank-column separator between the task list and the

@@ -23,7 +23,7 @@ func writeConfig(t *testing.T, body string) string {
 // clearSquashEnv unsets every SQUASH_* env var for the duration of the test.
 func clearSquashEnv(t *testing.T) {
 	t.Helper()
-	for _, k := range []string{"SQUASH_VAULT", "SQUASH_ENGINE", "SQUASH_TERMINAL", "SQUASH_SPAWN_CMD"} {
+	for _, k := range []string{"SQUASH_VAULT", "SQUASH_ENGINE", "SQUASH_TERMINAL", "SQUASH_SPAWN_CMD", "SQUASH_LAYOUT", "SQUASH_FOCUS_FOLLOWS_INPUT"} {
 		t.Setenv(k, "")
 		os.Unsetenv(k)
 	}
@@ -513,6 +513,88 @@ func TestLoad_InvalidEngine(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error should mention %q, got: %v", want, err)
 		}
+	}
+}
+
+func TestLayoutDefault(t *testing.T) {
+	d := Defaults()
+	if d.Layout != LayoutResponsive {
+		t.Errorf("default layout = %q, want %q", d.Layout, LayoutResponsive)
+	}
+	if !d.FocusFollowsInput {
+		t.Error("default focus_follows_input should be true")
+	}
+}
+
+func TestLoad_LayoutFromFile(t *testing.T) {
+	clearSquashEnv(t)
+	path := writeConfig(t, "layout: tabs\nfocus_follows_input: false\n")
+	cfg, err := Load(Overrides{ConfigPath: path})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Layout != LayoutTabs {
+		t.Errorf("layout = %q, want tabs", cfg.Layout)
+	}
+	if cfg.FocusFollowsInput {
+		t.Error("focus_follows_input = true, want false (from file)")
+	}
+	if cfg.Sources["layout"] != SourceFile || cfg.Sources["focus_follows_input"] != SourceFile {
+		t.Errorf("sources = %q/%q, want file/file", cfg.Sources["layout"], cfg.Sources["focus_follows_input"])
+	}
+}
+
+func TestLoad_LayoutEnvOverridesFile(t *testing.T) {
+	clearSquashEnv(t)
+	t.Setenv("SQUASH_LAYOUT", "stack")
+	path := writeConfig(t, "layout: tabs\n")
+	cfg, err := Load(Overrides{ConfigPath: path})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Layout != LayoutStack {
+		t.Errorf("layout = %q, want stack (env over file)", cfg.Layout)
+	}
+}
+
+func TestLoad_LayoutFlagOverridesEnv(t *testing.T) {
+	clearSquashEnv(t)
+	t.Setenv("SQUASH_LAYOUT", "stack")
+	ffi := false
+	cfg, err := Load(Overrides{Layout: LayoutColumns, FocusFollowsInput: &ffi})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Layout != LayoutColumns {
+		t.Errorf("layout = %q, want columns (flag over env)", cfg.Layout)
+	}
+	if cfg.FocusFollowsInput {
+		t.Error("focus_follows_input = true, want false (flag)")
+	}
+}
+
+func TestLoad_InvalidLayout(t *testing.T) {
+	clearSquashEnv(t)
+	path := writeConfig(t, "layout: mosaic\n")
+	_, err := Load(Overrides{ConfigPath: path})
+	if err == nil {
+		t.Fatal("expected error for unknown layout, got nil")
+	}
+	for _, want := range []string{"mosaic", LayoutColumns, LayoutStack, LayoutTabs, LayoutResponsive} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should mention %q, got: %v", want, err)
+		}
+	}
+}
+
+func TestFormat_IncludesLayout(t *testing.T) {
+	cfg := Defaults()
+	out := cfg.Format()
+	if !strings.Contains(out, "layout: responsive (from default)") {
+		t.Errorf("format should show layout line, got: %s", out)
+	}
+	if !strings.Contains(out, "focus_follows_input: true (from default)") {
+		t.Errorf("format should show focus_follows_input line, got: %s", out)
 	}
 }
 
