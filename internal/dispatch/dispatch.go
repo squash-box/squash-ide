@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -24,6 +25,25 @@ import (
 type Result struct {
 	Branch       string
 	WorktreePath string
+
+	// Native is non-nil only under engine == native. The spawn cannot complete
+	// inside Run there — a native pane is owned by the running tea.Program, not
+	// by this (possibly headless) call — so Run prepares the worktree + vault and
+	// hands the prepared command back for the TUI Model to feed to manager.Spawn.
+	// In tmux / OS-window mode the spawn already happened inside Run and Native
+	// is nil.
+	Native *NativeSpawn
+}
+
+// NativeSpawn carries everything the TUI needs to launch a task's process into
+// the in-process pane manager: the prepared command and the metadata that paints
+// the pane border. It mirrors pane.SpawnSpec without importing internal/pane
+// here (dispatch stays a layer below the UI).
+type NativeSpawn struct {
+	Command *exec.Cmd
+	TaskID  string
+	Title   string
+	Project string
 }
 
 // Run executes the full spawn workflow for a task: create worktree, move task
@@ -45,8 +65,10 @@ func Run(cfg config.Config, t task.Task) (Result, error) {
 
 	// Pre-flight: verify the window has room for another pane before
 	// touching the vault or creating a worktree. Avoids orphaned active
-	// tasks when the terminal is too narrow.
-	if cfg.Tmux.Enabled && tmux.InSession() {
+	// tasks when the terminal is too narrow. The native engine does its own
+	// capacity pre-check in the TUI (manager.CanSpawn, which knows the live
+	// region) before this runs, so the tmux width math is skipped there.
+	if cfg.Engine != config.EngineNative && cfg.Tmux.Enabled && tmux.InSession() {
 		tuiPane := tmux.CurrentPaneID()
 		totalCols, err := tmux.WindowWidth(tuiPane)
 		if err == nil {
@@ -123,7 +145,8 @@ func Run(cfg config.Config, t task.Task) (Result, error) {
 		return Result{}, fmt.Errorf("appending to log: %w", err)
 	}
 
-	// Spawn terminal
+	// Spawn the task process. Command construction (template expansion) is
+	// engine-neutral; only the placement forks.
 	vars := map[string]string{
 		"cwd":      worktreePath,
 		"task_id":  t.ID,
@@ -133,6 +156,25 @@ func Run(cfg config.Config, t task.Task) (Result, error) {
 		"repo":     repoPath,
 		"branch":   branch,
 	}
+
+	// Native: a pane is owned by the running tea.Program, so Run cannot place it
+	// here. Hand the prepared command back for the TUI Model to feed to
+	// manager.Spawn; the vault is already mutated above, exactly as in tmux mode.
+	if cfg.Engine == config.EngineNative {
+		infof("spawn prepared %s (engine=native, branch=%s) — pane handed to TUI", t.ID, branch)
+		return Result{
+			Branch:       branch,
+			WorktreePath: worktreePath,
+			Native: &NativeSpawn{
+				Command: spawner.BuildSpawnCmd(cfg, vars),
+				TaskID:  t.ID,
+				Title:   t.Title,
+				Project: t.Project,
+			},
+		}, nil
+	}
+
+	infof("spawn %s (engine=tmux, branch=%s)", t.ID, branch)
 	if err := spawner.SpawnWith(cfg, vars); err != nil {
 		return Result{}, fmt.Errorf("spawning terminal: %w", err)
 	}
@@ -216,8 +258,14 @@ func CompleteWithPR(cfg config.Config, t task.Task, prOverride string) error {
 	_ = status.Remove(t.ID)
 	_ = status.RemoveNotify(t.ID)
 
-	// Kill the task's tmux pane if running.
-	if cfg.Tmux.Enabled && tmux.InSession() {
+	// Tear the task's pane down. Native panes are owned by the running TUI,
+	// which closes them via manager.CloseByTask before this runs; here (which
+	// also covers the headless `squash-ide complete` path, where no manager
+	// exists) it is a no-op — the pane died with the TUI process. tmux mode
+	// kills the pane and reflows the rest.
+	if cfg.Engine == config.EngineNative {
+		infof("complete %s (engine=native) — pane teardown owned by the TUI, no-op here", t.ID)
+	} else if cfg.Tmux.Enabled && tmux.InSession() {
 		tuiPane := tmux.CurrentPaneID()
 		if pane, err := tmux.FindPaneByTask(tuiPane, t.ID); err == nil && pane != "" {
 			_ = tmux.KillPane(pane)
@@ -303,10 +351,14 @@ func Deactivate(cfg config.Config, t task.Task) error {
 	_ = status.Remove(t.ID)
 	_ = status.RemoveNotify(t.ID)
 
-	// Kill the task's tmux pane if running. Best-effort — the task may
-	// not have a pane (e.g. spawned in OS-window mode or leftover from
-	// a previous session).
-	if cfg.Tmux.Enabled && tmux.InSession() {
+	// Tear the task's pane down. Native panes are owned by the running TUI
+	// (which closes them via manager.CloseByTask before this runs); here — and
+	// on the headless path with no live manager — it is a no-op. tmux mode kills
+	// the pane and reflows. Best-effort either way: the task may have no pane
+	// (OS-window mode, or leftover from a previous session).
+	if cfg.Engine == config.EngineNative {
+		infof("deactivate %s (engine=native) — pane teardown owned by the TUI, no-op here", t.ID)
+	} else if cfg.Tmux.Enabled && tmux.InSession() {
 		tuiPane := tmux.CurrentPaneID()
 		if pane, err := tmux.FindPaneByTask(tuiPane, t.ID); err == nil && pane != "" {
 			_ = tmux.KillPane(pane)

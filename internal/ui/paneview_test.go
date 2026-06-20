@@ -20,10 +20,18 @@ type stubManager struct {
 	resizes    int
 	writes     [][]byte
 	repaint    chan struct{}
+
+	// T-039 lifecycle recording.
+	spawned     []pane.SpawnSpec
+	spawnErr    error // when set, Spawn returns it (exercises the rollback path)
+	closedTasks []string
+	focusedTask string
+	states      map[string]string // taskID -> last state set
+	canSpawn    bool
 }
 
 func newStubManager() *stubManager {
-	return &stubManager{repaint: make(chan struct{}, 1)}
+	return &stubManager{repaint: make(chan struct{}, 1), states: map[string]string{}, canSpawn: true}
 }
 
 func (s *stubManager) Resize(region pane.Rect) {
@@ -40,6 +48,28 @@ func (s *stubManager) WriteToFocused(b []byte) (int, error) {
 }
 
 func (s *stubManager) Repaint() <-chan struct{} { return s.repaint }
+
+func (s *stubManager) Spawn(spec pane.SpawnSpec) (*pane.Pane, error) {
+	s.spawned = append(s.spawned, spec)
+	if s.spawnErr != nil {
+		return nil, s.spawnErr
+	}
+	return nil, nil // the Model ignores the returned pane
+}
+
+func (s *stubManager) CloseByTask(taskID string) error {
+	s.closedTasks = append(s.closedTasks, taskID)
+	return nil
+}
+
+func (s *stubManager) FocusByTask(taskID string) error {
+	s.focusedTask = taskID
+	return nil
+}
+
+func (s *stubManager) SetStateByTask(taskID, state string) { s.states[taskID] = state }
+
+func (s *stubManager) CanSpawn() bool { return s.canSpawn }
 
 // nativeModel builds a native-engine Model wired to a stub manager, pre-loaded
 // with tasks and a default size, ready to drive through Update/View directly.

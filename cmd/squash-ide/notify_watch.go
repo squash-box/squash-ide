@@ -48,12 +48,25 @@ func runNotifyWatch(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// focusTaskPane brings the configured tmux session forward and selects the
-// pane tagged with the given taskID. Best-effort throughout: each tmux
-// step's error is swallowed-and-logged so a transient tmux glitch never
-// escalates beyond a stderr note. Skipped entirely when tmux is disabled
-// (`--no-tmux`) so that path stays silent on click as documented.
+// focusTaskPane focuses the pane bound to taskID, by whichever engine is
+// configured. Best-effort throughout: a failure never escalates beyond a stderr
+// note.
+//
+//   - Native: the pane lives inside the running TUI process, which this separate
+//     notify-watch process can't reach in-memory, so it drops a focus-request
+//     marker the TUI consumes on its next status poll ([[T-039]]). If no TUI is
+//     running the marker is simply never consumed (and ages out), so a click
+//     degrades gracefully — the native analogue of the `--no-tmux` silent click.
+//   - tmux: bring the session forward and select-pane on the @squash-task tag
+//     ([[T-034]]). Skipped when tmux is disabled (`--no-tmux`) so that path stays
+//     silent on click as documented.
 func focusTaskPane(cfg config.Config, taskID string) {
+	if cfg.Engine == config.EngineNative {
+		if err := status.RequestFocus(taskID); err != nil {
+			fmt.Fprintf(os.Stderr, "squash-ide notify-watch: focus request %s: %v\n", taskID, err)
+		}
+		return
+	}
 	if !cfg.Tmux.Enabled {
 		return
 	}

@@ -102,6 +102,23 @@ func TaskBorderFormatWithState(taskID, title, project, state string) string {
 	)
 }
 
+// BuildSpawnCmd constructs the *exec.Cmd for a task's spawn process from
+// cfg.Spawn, with its args template-expanded against vars and its working
+// directory set to {cwd}. It is the engine-neutral half of spawning, shared by
+// the native engine: the tmux/OS-window paths render the command to a shell
+// string via config.BuildExec, whereas the native pane manager (T-037) runs an
+// *exec.Cmd directly on a PTY it owns, so it consumes this instead.
+//
+// Args are passed as discrete argv entries (already expanded), matching how the
+// shell paths quote each arg — `claude "/implement T-039"` becomes a single
+// "/implement T-039" argument either way.
+func BuildSpawnCmd(cfg config.Config, vars map[string]string) *exec.Cmd {
+	spawnArgs := config.ExpandAll(cfg.Spawn.Args, vars)
+	cmd := exec.Command(cfg.Spawn.Command, spawnArgs...)
+	cmd.Dir = vars["cwd"]
+	return cmd
+}
+
 func SpawnWith(cfg config.Config, vars map[string]string) error {
 	spawnArgs := config.ExpandAll(cfg.Spawn.Args, vars)
 	execCmd := config.BuildExec(cfg.Spawn.Command, spawnArgs)

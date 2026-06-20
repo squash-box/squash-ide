@@ -25,6 +25,20 @@ type paneManager interface {
 	// Repaint is the coalescing output signal the UI selects on to know a
 	// re-render is due.
 	Repaint() <-chan struct{}
+
+	// T-039 lifecycle surface — the native replacement for dispatch's tmux
+	// side effects, keyed on task id rather than internal pane id.
+
+	// Spawn launches spec.Command in a new pane (Enter-to-spawn).
+	Spawn(spec pane.SpawnSpec) (*pane.Pane, error)
+	// CloseByTask tears down the pane running taskID (complete / deactivate).
+	CloseByTask(taskID string) error
+	// FocusByTask focuses the pane running taskID (notify-click focus).
+	FocusByTask(taskID string) error
+	// SetStateByTask drives the pane's border badge from the status pipeline.
+	SetStateByTask(taskID, state string)
+	// CanSpawn reports whether the region admits one more pane (spawn pre-flight).
+	CanSpawn() bool
 }
 
 // paneGutter is the blank-column separator between the task list and the
