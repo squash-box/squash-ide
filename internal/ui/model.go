@@ -174,6 +174,12 @@ type tasksLoadedMsg struct {
 type dispatchDoneMsg struct {
 	taskID string
 	branch string
+	task   task.Task // carried for native spawn-failure rollback
+
+	// native is non-nil under engine=native: the prepared command the handler
+	// feeds to manager.Spawn (the pane is launched on the UI goroutine, not in
+	// the dispatch goroutine, because the manager lives in the Model).
+	native *dispatch.NativeSpawn
 }
 
 type dispatchErrMsg struct {
@@ -194,6 +200,9 @@ type deactivateDoneMsg struct {
 
 type statusTickMsg struct {
 	statuses map[string]status.File
+	// focusTaskID is set (native engine) when a notify-click left a focus
+	// request for the TUI to honour — see status.TakeFocusRequest.
+	focusTaskID string
 }
 
 // paneOutputMsg is emitted (native mode) when the pane manager signals output
@@ -213,9 +222,20 @@ func (m Model) loadTasks() tea.Msg {
 }
 
 func (m Model) tickStatus() tea.Cmd {
+	engineNative := m.engineNative
 	return tea.Tick(1*time.Second, func(t time.Time) tea.Msg {
 		statuses, _ := status.ReadAll()
-		return statusTickMsg{statuses: statuses}
+		msg := statusTickMsg{statuses: statuses}
+		// Native engine: piggyback the notify-click focus request on the same
+		// poll the badge sync already runs, so a click brings the right pane
+		// forward within a tick (the tmux path does this synchronously via
+		// select-pane; here it crosses the process boundary as a file marker).
+		if engineNative {
+			if id, ok := status.TakeFocusRequest(); ok {
+				msg.focusTaskID = id
+			}
+		}
+		return msg
 	})
 }
 
@@ -226,7 +246,25 @@ func (m Model) runDispatch(t task.Task) tea.Cmd {
 		if err != nil {
 			return dispatchErrMsg{err: err}
 		}
-		return dispatchDoneMsg{taskID: t.ID, branch: res.Branch}
+		return dispatchDoneMsg{taskID: t.ID, branch: res.Branch, task: t, native: res.Native}
+	}
+}
+
+// runRollback undoes a native dispatch whose pane failed to spawn: it moves the
+// just-activated task back to the backlog and removes the worktree (via
+// Deactivate, which under engine=native does no pane teardown), then reloads.
+// Mirrors the tmux reject-and-kill cleanup (spawner.go:173-176) — no orphan
+// active task, no orphan worktree. The local task is stamped active because Run
+// already moved the file there.
+func (m Model) runRollback(t task.Task) tea.Cmd {
+	cfg := m.cfg
+	return func() tea.Msg {
+		t.Status = "active"
+		if err := dispatch.Deactivate(cfg, t); err != nil {
+			uidebugf("native spawn rollback failed for %s: %v", t.ID, err)
+		}
+		tasks, err := vault.ReadAll(cfg.Vault)
+		return tasksLoadedMsg{tasks: tasks, err: err}
 	}
 }
 
@@ -369,6 +407,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case dispatchDoneMsg:
 		m.dispatching = false
+		// Native engine: the worktree + vault are prepared; launch the pane into
+		// the in-process manager now (the manager lives here, not in the dispatch
+		// goroutine). Keep list focus — the new pane must not steal it ([[T-031]]).
+		if m.engineNative && msg.native != nil {
+			spec := pane.SpawnSpec{
+				Command: msg.native.Command,
+				TaskID:  msg.native.TaskID,
+				Title:   msg.native.Title,
+				Project: msg.native.Project,
+			}
+			if _, err := m.manager.Spawn(spec); err != nil {
+				// PTY/layout failure after the vault was mutated — roll back so no
+				// orphan active task or worktree is left behind.
+				uidebugf("native spawn failed for %s: %v", msg.taskID, err)
+				m.statusMsg = fmt.Sprintf("spawn failed for %s — rolled back: %v", msg.taskID, err)
+				m.statusIsErr = true
+				m.resetCursorOnLoad = true
+				return m, m.runRollback(msg.task)
+			}
+		}
 		m.statusMsg = fmt.Sprintf("spawned %s", msg.taskID)
 		m.statusIsErr = false
 		m.resetCursorOnLoad = true
@@ -435,6 +493,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// branch, the pane border would silently retain its last-painted
 		// format past the staleness horizon and diverge from the list badge.
 		//
+		// Native mode drives the pane border badges directly from the same
+		// status states (no tmux), and honours any pending notify-click focus
+		// request. The state diff mirrors the tmux arm: update from a present
+		// entry; synthesise idle when an entry that was present goes absent/stale
+		// (the [[T-023]] invariant); leave a never-seen task on its spawn-time
+		// "working" badge rather than painting idle before claude's first report.
+		if m.engineNative {
+			for _, t := range m.allTasks {
+				if t.Status != "active" {
+					continue
+				}
+				newSub, newOK := msg.statuses[t.ID]
+				_, oldOK := old[t.ID]
+				switch {
+				case newOK:
+					m.manager.SetStateByTask(t.ID, newSub.State)
+				case oldOK:
+					m.manager.SetStateByTask(t.ID, pane.StateIdle)
+				}
+			}
+			if msg.focusTaskID != "" {
+				if err := m.manager.FocusByTask(msg.focusTaskID); err == nil {
+					m.paneFocused = true
+					uidebugf("notify-click focus -> %s", msg.focusTaskID)
+				}
+			}
+			return m, m.tickStatus()
+		}
+
 		// Native mode skips the tmux border sync entirely — pane badges are
 		// painted by the manager from the same status states.
 		if !m.engineNative && tmux.InSession() {
@@ -558,11 +645,34 @@ func (m Model) handlePaneFocusedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// closeNativePane tears down the native pane running taskID, if any. It is the
+// Model-side half of complete/deactivate under engine=native — dispatch can't
+// reach the in-process manager, so the lifecycle keypress closes the pane and
+// dispatch only does the vault/worktree teardown. A no-op in tmux mode and for a
+// task with no live pane (ErrUnknownPane swallowed). Returns focus to the list
+// so the user isn't left typing into a region whose pane just vanished.
+func (m *Model) closeNativePane(taskID string) {
+	if !m.engineNative || m.manager == nil {
+		return
+	}
+	_ = m.manager.CloseByTask(taskID)
+	m.paneFocused = false
+}
+
 func (m Model) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, keys.Confirm), key.Matches(msg, keys.Enter):
 		t := *m.confirming
 		m.confirming = nil
+		// Native pre-flight: reject before touching the vault if the region can't
+		// fit another pane — the analogue of dispatch's tmux width check, so a
+		// too-narrow terminal never orphans an active task.
+		if m.engineNative && !m.manager.CanSpawn() {
+			uidebugf("native spawn rejected for %s: region full", t.ID)
+			m.statusMsg = fmt.Sprintf("can't spawn %s — widen the terminal (no room for another pane)", t.ID)
+			m.statusIsErr = true
+			return m, nil
+		}
 		m.dispatching = true
 		m.statusMsg = fmt.Sprintf("spawning %s...", t.ID)
 		m.statusIsErr = false
@@ -579,6 +689,10 @@ func (m Model) handleCompleteConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, keys.Confirm), key.Matches(msg, keys.Enter):
 		t := *m.completing
 		m.completing = nil
+		// Native: close the pane here (the manager lives in the Model; dispatch's
+		// teardown is a no-op under engine=native). Best-effort — an unknown task
+		// is a no-op, so a task whose pane already died completes cleanly.
+		m.closeNativePane(t.ID)
 		m.dispatching = true
 		m.statusMsg = fmt.Sprintf("completing %s...", t.ID)
 		m.statusIsErr = false
@@ -595,6 +709,9 @@ func (m Model) handleDeactivateConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, keys.Confirm), key.Matches(msg, keys.Enter):
 		t := *m.deactivating
 		m.deactivating = nil
+		// Native: close the pane here (parity with the tmux Deactivate teardown,
+		// which kills the pane before removing the worktree).
+		m.closeNativePane(t.ID)
 		m.dispatching = true
 		m.statusMsg = fmt.Sprintf("deactivating %s...", t.ID)
 		m.statusIsErr = false

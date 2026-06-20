@@ -7,6 +7,21 @@ import (
 	"github.com/squashbox/squash-ide/internal/task"
 )
 
+func TestRunSpawn_NativeEngineRefusesHeadless(t *testing.T) {
+	flagEngine = "native"
+	defer func() { flagEngine = "" }()
+
+	// The native guard returns before any vault/flag access, so a nil command
+	// and an unset vault are fine — that's the point: no state is touched.
+	err := runSpawn(nil, []string{"T-042"})
+	if err == nil {
+		t.Fatal("expected runSpawn to refuse under engine=native")
+	}
+	if !strings.Contains(err.Error(), "native") || !strings.Contains(err.Error(), "T-042") {
+		t.Errorf("error should name the constraint and the task, got: %v", err)
+	}
+}
+
 func TestFindTask_Match(t *testing.T) {
 	tasks := []task.Task{
 		{ID: "T-001", Title: "one"},

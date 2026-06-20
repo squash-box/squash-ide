@@ -233,13 +233,27 @@ created. Press `Ctrl+W` to hand keyboard focus to the pane region (keys then
 route to the focused pane) and `Ctrl+W` again to return focus to the list;
 `Ctrl+C` always quits. Resizing the terminal reflows the region in-process.
 
-**Current limitations.** Native mode is opt-in and incomplete: the pane region
-is presently an **empty placeholder** — spawning real task processes into it
-(so `Enter` launches Claude in a native pane instead of a tmux one) lands in a
-follow-up task. Until then, `native` is useful for previewing the layout and
-input routing, while `tmux` remains the default and the recommended daily
-surface. The two engines are independent of `--no-tmux`, which only affects the
-`tmux` engine's fallback to OS windows.
+Native mode is at functional parity with tmux for the core lifecycle: pressing
+`Enter` on a backlog task launches Claude in a native pane (the list keeps
+focus), completing (`c`) or blocking (`b`) a task tears its pane down and
+reflows the rest, and clicking an "input required" desktop notification focuses
+the matching native pane. Pane border badges track the same
+`working`/`idle`/`input_required` status pipeline the tmux border consumed.
+
+**Headless-spawn constraint.** A native pane is owned by the running TUI process
+(it holds the PTY in-memory), so it cannot be created by the short-lived
+`squash-ide spawn T-NNN` subcommand — there is no live program to attach it to,
+and the pane could not outlive the command. Under `engine: native`,
+`squash-ide spawn` therefore refuses with a clear message and leaves the task
+untouched; spawn from the running dashboard with `Enter`, or use `engine: tmux`
+for headless spawning. Likewise, completing/blocking a task from the headless
+CLI (or from a TUI session other than the one that spawned it) does no pane
+teardown — the pane already died with its owning process; the vault transition
+still completes cleanly.
+
+`native` remains **opt-in**; `tmux` is still the default and the recommended
+daily surface. The two engines are independent of `--no-tmux`, which only
+affects the `tmux` engine's fallback to OS windows.
 
 ### List tasks (JSON)
 

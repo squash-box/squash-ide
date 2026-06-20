@@ -189,6 +189,83 @@ func (m *Manager) Focus(id string) error {
 	return nil
 }
 
+// CloseByTask closes the pane running taskID. It is the native analogue of the
+// tmux teardown's FindPaneByTask → KillPane: the TUI keys lifecycle off the task
+// id, not the internal pane id. An unknown task id is a no-op returning
+// ErrUnknownPane, so a complete/deactivate of a task with no live pane (spawned
+// in a prior, now-dead TUI session) tears the rest of the dispatch flow down
+// cleanly. Delegates to Close so the focus-shift and re-tile logic is shared.
+func (m *Manager) CloseByTask(taskID string) error {
+	m.mu.Lock()
+	idx := m.indexOfTaskLocked(taskID)
+	if idx < 0 {
+		m.mu.Unlock()
+		return fmt.Errorf("pane: close task %s: %w", taskID, ErrUnknownPane)
+	}
+	id := m.panes[idx].id
+	m.mu.Unlock()
+	return m.Close(id)
+}
+
+// FocusByTask focuses the pane running taskID. Unknown task id is a no-op
+// returning ErrUnknownPane (the notify-click focus path swallows it so a click
+// for a task whose pane has gone away never crashes). Delegates to Focus.
+func (m *Manager) FocusByTask(taskID string) error {
+	m.mu.Lock()
+	idx := m.indexOfTaskLocked(taskID)
+	if idx < 0 {
+		m.mu.Unlock()
+		return fmt.Errorf("pane: focus task %s: %w", taskID, ErrUnknownPane)
+	}
+	id := m.panes[idx].id
+	m.mu.Unlock()
+	return m.Focus(id)
+}
+
+// SetStateByTask updates the lifecycle state of the pane running taskID, driving
+// its painted border badge. It is how the TUI's status-file poll (the same
+// working|idle|input_required|testing pipeline the tmux border consumed) reaches
+// the native pane. Unknown task id is a silent no-op; a dead pane ignores the
+// write (Pane.SetState freezes once dead), preserving the [[T-035]] remain-on-
+// exit badge.
+func (m *Manager) SetStateByTask(taskID, state string) {
+	m.mu.Lock()
+	idx := m.indexOfTaskLocked(taskID)
+	if idx < 0 {
+		m.mu.Unlock()
+		return
+	}
+	p := m.panes[idx]
+	m.mu.Unlock()
+	p.SetState(state)
+}
+
+// CanSpawn reports whether the current region admits one more pane under the
+// active Strategy/Constraints. The TUI calls it as a pre-flight before touching
+// the vault, the native analogue of dispatch's tmux width check — so a spawn
+// that wouldn't fit is rejected without orphaning an active task. Before the UI
+// has reported a size (region zero) it admits, mirroring Spawn's "admit until
+// the first Resize tiles" rule.
+func (m *Manager) CanSpawn() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	region := m.region
+	if region.W <= 0 || region.H <= 0 {
+		return true
+	}
+	_, err := m.strategy.Arrange(region, len(m.panes)+1, m.constraints)
+	return err == nil
+}
+
+// HasPaneForTask reports whether a live (manager-tracked) pane exists for
+// taskID. A pane that has gone StateDead but not been Closed still counts —
+// it is still in the set.
+func (m *Manager) HasPaneForTask(taskID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.indexOfTaskLocked(taskID) >= 0
+}
+
 // WriteToFocused forwards raw input bytes (typically from EncodeKey) to the
 // focused pane's child PTY. It returns (0, nil) when no pane is focused, so the
 // native UI's input router (T-038) can forward a keystroke unconditionally
@@ -290,6 +367,21 @@ func (m *Manager) indexOfLocked(id string) int {
 	}
 	for i, p := range m.panes {
 		if p.id == id {
+			return i
+		}
+	}
+	return -1
+}
+
+// indexOfTaskLocked returns the slice index of the pane running taskID, or -1.
+// Caller holds mu. An empty taskID never matches (a placeholder/taskless pane is
+// not addressable by task).
+func (m *Manager) indexOfTaskLocked(taskID string) int {
+	if taskID == "" {
+		return -1
+	}
+	for i, p := range m.panes {
+		if p.taskID == taskID {
 			return i
 		}
 	}

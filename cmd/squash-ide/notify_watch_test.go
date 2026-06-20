@@ -105,6 +105,26 @@ func TestFocusTaskPane_NoMatchingPane_NoSelect(t *testing.T) {
 	}
 }
 
+func TestFocusTaskPane_Native_WritesFocusRequest(t *testing.T) {
+	restore := status.SetFocusDirForTesting(t.TempDir())
+	defer restore()
+
+	// A recorder proves the native path never shells tmux.
+	r := &tmuxRecorder{}
+	swapTmuxRunOut(t, r)
+
+	cfg := config.Config{Engine: config.EngineNative, Tmux: config.Tmux{Enabled: true, SessionName: "squash-ide"}}
+	focusTaskPane(cfg, "T-100")
+
+	if len(r.calls) != 0 {
+		t.Errorf("native focus must not issue tmux calls, got %v", r.calls)
+	}
+	id, ok := status.TakeFocusRequest()
+	if !ok || id != "T-100" {
+		t.Errorf("native focus should leave a focus request for T-100, got (%q, %v)", id, ok)
+	}
+}
+
 func TestFocusTaskPane_TmuxDisabled_NoCalls(t *testing.T) {
 	r := &tmuxRecorder{}
 	swapTmuxRunOut(t, r)

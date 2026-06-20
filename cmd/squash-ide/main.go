@@ -319,6 +319,20 @@ func runSpawn(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+
+	// A native pane is owned by the running tea.Program and cannot be created by
+	// this short-lived subcommand — there is no live manager to attach it to, and
+	// it could not outlive the process. This is an inherent property of owning the
+	// PTY in-process, not a gap to paper over: refuse before mutating any vault
+	// state so the operator gets a clear message instead of an orphaned worktree.
+	// Spawn a task from the running TUI (Enter), or use engine=tmux for headless.
+	if cfg.Engine == config.EngineNative {
+		return fmt.Errorf(
+			"`squash-ide spawn` is unavailable under engine=native: native panes "+
+				"require the running TUI (press Enter on a task in the dashboard). "+
+				"Use engine=tmux for headless spawn (task %s left untouched)", args[0])
+	}
+
 	if err := config.Validate(cfg); err != nil {
 		return err
 	}
