@@ -6,8 +6,6 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
-
-	"github.com/charmbracelet/lipgloss"
 )
 
 // ErrUnknownPane is returned (wrapped) by Focus/Close when no pane has the given
@@ -40,6 +38,21 @@ type Manager struct {
 	starter     ptyStarter
 	nextID      int
 
+	// collapsed marks panes shown as a thin strip rather than a full box
+	// (T-040). Keyed by pane id; toggling reflows the siblings.
+	collapsed map[string]bool
+
+	// focusFollowsInput, when true, surfaces a pane that enters
+	// StateInputRequired by giving it focus — the in-TUI dual of the [[T-034]]
+	// notification click. Configurable because some users won't want focus
+	// stolen.
+	focusFollowsInput bool
+
+	// blinkOn is the badge-animation phase, flipped by Tick. It rides the UI's
+	// status tick rather than a timer of its own (the [[T-024]]/T-040 idiom), so
+	// the input_required badge pulses without a new goroutine.
+	blinkOn bool
+
 	// repaint is a coalescing repaint signal: the UI selects on it (T-038) and
 	// re-renders. A buffered-size-1 channel with non-blocking send collapses a
 	// burst of pane output into a single pending repaint.
@@ -60,11 +73,16 @@ func WithConstraints(c Constraints) Option { return func(m *Manager) { m.constra
 // never forks a real process — the internal/exec.Runner pattern.
 func WithStarter(s ptyStarter) Option { return func(m *Manager) { m.starter = s } }
 
+// WithFocusFollowsInput sets whether a pane entering input_required auto-focuses
+// (default off; the UI enables it from config).
+func WithFocusFollowsInput(on bool) Option { return func(m *Manager) { m.focusFollowsInput = on } }
+
 // NewManager builds a Manager with sensible defaults, applying any options.
 func NewManager(opts ...Option) *Manager {
 	m := &Manager{
 		strategy:    FlexColumns{},
-		constraints: Constraints{MinWidth: 20, Gutter: 1},
+		constraints: Constraints{MinWidth: 20, MinHeight: 5, Gutter: 1},
+		collapsed:   map[string]bool{},
 		starter:     DefaultStarter,
 		repaint:     make(chan struct{}, 1),
 	}
@@ -99,7 +117,6 @@ func (m *Manager) Spawn(spec SpawnSpec) (*Pane, error) {
 	defer m.mu.Unlock()
 
 	region := m.region
-	n := len(m.panes) + 1
 
 	master, proc, err := m.starter.Start(spec.Command)
 	if err != nil {
@@ -114,9 +131,11 @@ func (m *Manager) Spawn(spec SpawnSpec) (*Pane, error) {
 
 	// Verify the layout admits n panes once we know the region. Before the UI
 	// has reported a size (region zero), admit unconditionally and let the
-	// first Resize tile.
+	// first Resize tile. Under a reflowing strategy (Responsive) this never
+	// rejects — it degrades columns→stack→tabs; under layout: columns it still
+	// hard-rejects, the contrast the acceptance demo shows.
 	if region.W > 0 && region.H > 0 {
-		rects, lerr := m.strategy.Arrange(region, n, m.constraints)
+		rects, _, lerr := computeRects(m.strategy, region, m.panes, m.collapsed, m.constraints)
 		if lerr != nil {
 			m.panes = m.panes[:len(m.panes)-1] // un-append
 			_ = p.Close()                      // kill + reap the just-created child
@@ -144,6 +163,7 @@ func (m *Manager) Close(id string) error {
 	}
 	p := m.panes[idx]
 	m.panes = append(m.panes[:idx], m.panes[idx+1:]...)
+	delete(m.collapsed, id) // a closed pane carries no collapse state
 	if m.focusID == id {
 		m.focusID = ""
 		if len(m.panes) > 0 {
@@ -161,7 +181,7 @@ func (m *Manager) Close(id string) error {
 
 	m.mu.Lock()
 	if n > 0 && region.W > 0 && region.H > 0 {
-		if rects, lerr := m.strategy.Arrange(region, n, m.constraints); lerr == nil {
+		if rects, _, lerr := computeRects(m.strategy, region, m.panes, m.collapsed, m.constraints); lerr == nil {
 			m.applyLayoutLocked(rects)
 		} else {
 			warnf("manager: re-tile after close failed (swallowed): %v", lerr)
@@ -236,8 +256,22 @@ func (m *Manager) SetStateByTask(taskID, state string) {
 		return
 	}
 	p := m.panes[idx]
+	// Focus-follows-input: surface a pane that just paused on a permission
+	// dialog by giving it focus, the in-TUI dual of the [[T-034]] notification
+	// click. Idempotent (only when focus is elsewhere) and never steals focus
+	// onto a dead pane. The UI flips its own list/pane focus to match.
+	surfaced := false
+	if m.focusFollowsInput && state == StateInputRequired && !p.IsDead() && m.focusID != p.id {
+		m.focusID = p.id
+		surfaced = true
+	}
 	m.mu.Unlock()
+
 	p.SetState(state)
+	if surfaced {
+		debugf("manager: focus-follows-input surfaced %s (task %s)", p.id, taskID)
+		m.requestRepaint()
+	}
 }
 
 // CanSpawn reports whether the current region admits one more pane under the
@@ -253,7 +287,15 @@ func (m *Manager) CanSpawn() bool {
 	if region.W <= 0 || region.H <= 0 {
 		return true
 	}
-	_, err := m.strategy.Arrange(region, len(m.panes)+1, m.constraints)
+	n := len(m.panes) + 1
+	concrete, axis := resolveStrategy(m.strategy, region, n, m.constraints)
+	if axis == axisTabbed {
+		_, err := concrete.Arrange(region, n, m.constraints)
+		return err == nil
+	}
+	// The prospective pane spawns expanded; existing collapsed panes stay strips.
+	nCollapsed := countCollapsed(m.panes, m.collapsed)
+	_, err := concrete.Arrange(reduceRegion(region, nCollapsed, axis, m.constraints), n-nCollapsed, m.constraints)
 	return err == nil
 }
 
@@ -290,6 +332,121 @@ func (m *Manager) Focused() *Pane {
 	return m.panes[idx]
 }
 
+// SetStrategy swaps the active layout strategy and re-tiles. It is the runtime
+// half of the T-037 Open/Closed seam: the cycle-layout keybinding switches
+// columns→stack→tabs→responsive without the Manager knowing the concrete types.
+// A nil strategy is ignored.
+func (m *Manager) SetStrategy(s Strategy) {
+	if s == nil {
+		return
+	}
+	m.mu.Lock()
+	m.strategy = s
+	m.retileLocked()
+	m.mu.Unlock()
+	debugf("manager: layout strategy set")
+	m.requestRepaint()
+}
+
+// SetFocusFollowsInput toggles the focus-follows-input behaviour at runtime.
+func (m *Manager) SetFocusFollowsInput(on bool) {
+	m.mu.Lock()
+	m.focusFollowsInput = on
+	m.mu.Unlock()
+}
+
+// ToggleCollapse flips whether the pane with id renders as a thin strip, then
+// re-tiles so siblings reflow. Unknown id is a no-op.
+func (m *Manager) ToggleCollapse(id string) {
+	m.mu.Lock()
+	if m.indexOfLocked(id) < 0 {
+		m.mu.Unlock()
+		return
+	}
+	now := !m.collapsed[id]
+	if now {
+		m.collapsed[id] = true
+	} else {
+		delete(m.collapsed, id)
+	}
+	m.retileLocked()
+	m.mu.Unlock()
+	debugf("manager: collapse %s -> %v", id, now)
+	m.requestRepaint()
+}
+
+// ToggleCollapseFocused collapses/expands the focused pane, or the first pane
+// when focus is on the list. A no-op when there are no panes — the UI binds the
+// collapse key to it so the user needn't know internal pane ids.
+func (m *Manager) ToggleCollapseFocused() {
+	m.mu.Lock()
+	id := m.focusID
+	if m.indexOfLocked(id) < 0 {
+		if len(m.panes) == 0 {
+			m.mu.Unlock()
+			return
+		}
+		id = m.panes[0].id
+	}
+	m.mu.Unlock()
+	m.ToggleCollapse(id)
+}
+
+// FocusNext moves focus to the next pane in order (wrapping). It is also the
+// next-tab action under the Tabs layout, where the focused pane is the active
+// tab. With no panes it is a no-op; with none focused it focuses the first.
+func (m *Manager) FocusNext() { m.focusStep(+1) }
+
+// FocusPrev moves focus to the previous pane in order (wrapping); the prev-tab
+// action under Tabs.
+func (m *Manager) FocusPrev() { m.focusStep(-1) }
+
+func (m *Manager) focusStep(delta int) {
+	m.mu.Lock()
+	n := len(m.panes)
+	if n == 0 {
+		m.mu.Unlock()
+		return
+	}
+	idx := m.indexOfLocked(m.focusID)
+	if idx < 0 {
+		idx = 0 // nothing focused yet — start at the first pane
+	} else {
+		idx = ((idx+delta)%n + n) % n
+	}
+	m.focusID = m.panes[idx].id
+	id := m.focusID
+	m.mu.Unlock()
+	debugf("manager: focus -> %s", id)
+	m.requestRepaint()
+}
+
+// Tick advances the badge-animation phase and requests a repaint. The UI calls
+// it on its status tick so the input_required badge pulses without a dedicated
+// timer. Safe at any time (it touches no pane), so a tick that lands after a
+// pane closed is harmless.
+func (m *Manager) Tick() {
+	m.mu.Lock()
+	m.blinkOn = !m.blinkOn
+	m.mu.Unlock()
+	m.requestRepaint()
+}
+
+// retileLocked recomputes geometry under the active strategy and collapse state
+// and resizes the panes. Best-effort: a rejection is warn-logged and the prior
+// geometry retained ([[T-031]] idiom). Caller holds mu.
+func (m *Manager) retileLocked() {
+	if len(m.panes) == 0 || m.region.W <= 0 || m.region.H <= 0 {
+		return
+	}
+	rects, _, err := computeRects(m.strategy, m.region, m.panes, m.collapsed, m.constraints)
+	if err != nil {
+		warnf("manager: re-tile rejected (swallowed): %v", err)
+		return
+	}
+	m.applyLayoutLocked(rects)
+}
+
 // Resize records the new available region and re-tiles every pane. A layout
 // that no longer fits is warn-logged and the previous geometry retained, rather
 // than crashing the TUI ([[T-031]] best-effort idiom).
@@ -301,7 +458,7 @@ func (m *Manager) Resize(region Rect) {
 	if n == 0 {
 		return
 	}
-	rects, err := m.strategy.Arrange(region, n, m.constraints)
+	rects, _, err := computeRects(m.strategy, region, m.panes, m.collapsed, m.constraints)
 	if err != nil {
 		warnf("manager: resize layout rejected (swallowed): %v", err)
 		return
@@ -310,9 +467,10 @@ func (m *Manager) Resize(region Rect) {
 	debugf("manager: resized to %dx%d — %d pane(s)", region.W, region.H, n)
 }
 
-// Render lays the panes out across region and concatenates their rendered
-// boxes left to right (with the gutter between them). A layout failure yields
-// an empty string rather than a panic.
+// Render lays the panes out across region under the active strategy and stitches
+// their rendered boxes together along the chosen axis: columns (left to right),
+// rows (top to bottom), or a tab strip + one pane. Collapsed panes render as
+// strips. A layout failure yields an empty string rather than a panic.
 func (m *Manager) Render(region Rect) string {
 	m.mu.Lock()
 	panes := append([]*Pane(nil), m.panes...)
@@ -320,26 +478,25 @@ func (m *Manager) Render(region Rect) string {
 	gutter := m.constraints.Gutter
 	strategy := m.strategy
 	constraints := m.constraints
+	collapsed := make(map[string]bool, len(m.collapsed))
+	for k, v := range m.collapsed {
+		collapsed[k] = v
+	}
+	blink := m.blinkOn
 	m.mu.Unlock()
 
 	if len(panes) == 0 {
 		return ""
 	}
-	rects, err := strategy.Arrange(region, len(panes), constraints)
+	rects, axis, err := computeRects(strategy, region, panes, collapsed, constraints)
 	if err != nil {
 		warnf("manager: render layout rejected (swallowed): %v", err)
 		return ""
 	}
-
-	parts := make([]string, 0, len(panes)*2)
-	gap := strings.Repeat(" ", gutter)
-	for i, p := range panes {
-		if gutter > 0 {
-			parts = append(parts, gap) // leading separator before each pane
-		}
-		parts = append(parts, p.Render(rects[i].W, rects[i].H, p.id == focusID))
+	if axis == axisTabbed {
+		return composeTabs(region, panes, rects, focusID, blink)
 	}
-	return lipgloss.JoinHorizontal(lipgloss.Top, parts...)
+	return composeLinear(axis, panes, rects, collapsed, focusID, gutter, blink)
 }
 
 // Panes returns a snapshot copy of the pane set, in order.
@@ -349,11 +506,17 @@ func (m *Manager) Panes() []*Pane {
 	return append([]*Pane(nil), m.panes...)
 }
 
-// applyLayoutLocked resizes each pane to its laid-out rect. Caller holds mu.
+// applyLayoutLocked resizes each pane to its laid-out rect. Collapsed panes are
+// skipped — they render as a fixed strip that ignores the emulator grid, so
+// reflowing their child every toggle would be churn for no visible gain. Caller
+// holds mu.
 func (m *Manager) applyLayoutLocked(rects []Rect) {
 	for i, p := range m.panes {
 		if i >= len(rects) {
 			break
+		}
+		if m.collapsed[p.id] {
+			continue
 		}
 		p.Resize(interiorRows(rects[i].H), interiorCols(rects[i].W))
 	}

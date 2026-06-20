@@ -18,20 +18,26 @@ type Rect struct {
 //     that would put any pane below it is rejected rather than silently
 //     squeezed — the same contract as tmux.Tile, whose caller refuses the
 //     spawn.
+//   - MinHeight is the floor on a single pane's bounding-box height. It is the
+//     row-wise dual of MinWidth: StackRows (T-040) rejects a stack that would
+//     put any pane below it, the same way FlexColumns rejects on MinWidth.
+//     FlexColumns ignores it (columns always span the full region height).
 //   - Gutter is the number of blank columns reserved per pane for separation
 //     between adjacent panes (and a leading column before the first). One
 //     gutter column per pane mirrors tmux's one-border-per-pane model, which is
 //     what makes FlexColumns reproduce tmux.Tile's column math exactly.
+//     StackRows reuses it as a row gutter (one leading blank row per pane).
 type Constraints struct {
-	MinWidth int
-	Gutter   int
+	MinWidth  int
+	MinHeight int
+	Gutter    int
 }
 
 // ErrInsufficientSpace is returned (wrapped) by a Strategy when the region is
 // too narrow to fit the requested panes at the configured MinWidth. Callers
 // match it with errors.Is to distinguish a layout rejection (refuse the spawn)
 // from a programming error (bad n / bad region).
-var ErrInsufficientSpace = errors.New("not enough horizontal space for another pane")
+var ErrInsufficientSpace = errors.New("not enough space for another pane")
 
 // Strategy computes per-pane geometry from an available region. It is a pure
 // function behind an interface so future layouts (stacking, tabs, collapse —

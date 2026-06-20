@@ -211,9 +211,11 @@ func (p *Pane) Resize(rows, cols int) {
 
 // Render draws the pane as a lipgloss-bordered box of exactly width×height
 // cells: a status header (the painted equivalent of tmux's pane-border-format)
-// above the emulator grid. focused selects the border color. width/height are
-// the bounding box from the layout Strategy.
-func (p *Pane) Render(width, height int, focused bool) string {
+// above the emulator grid. focused selects the border color. blink is the
+// animation phase (T-040): an input_required pane's badge pulses on it, riding
+// the Manager's tick rather than a timer of its own. width/height are the
+// bounding box from the layout Strategy.
+func (p *Pane) Render(width, height int, focused, blink bool) string {
 	cols := interiorCols(width)
 	rows := interiorRows(height)
 
@@ -222,30 +224,77 @@ func (p *Pane) Render(width, height int, focused bool) string {
 	state := p.state
 	p.mu.Unlock()
 
-	header := p.headerLine(state, cols)
+	header := p.headerLine(state, cols, blink)
 	content := lipgloss.JoinVertical(lipgloss.Left, header, grid)
 
-	border := lipgloss.Color("240") // dim grey, unfocused
-	if focused {
-		border = lipgloss.Color("69") // bright blue, focused
-	}
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(border).
+		BorderForeground(borderColor(state, focused, blink)).
 		Width(cols).
 		Height(rows + headerRows).
 		Render(content)
 }
 
+// RenderStrip draws a collapsed pane as a thin strip — a tall sliver under the
+// columns axis, a short bar under the rows axis — showing just its state badge
+// and task id, not its emulator grid. Its sibling panes reflow into the space it
+// gives up (the Manager carves the strip out before arranging the rest). The
+// border keeps the pane's state colour so a collapsed input_required pane still
+// reads at a glance.
+func (p *Pane) RenderStrip(width, height int, axis layoutAxis, focused, blink bool) string {
+	cols := interiorCols(width)
+	rows := interiorRows(height) + headerRows
+	if rows < 1 {
+		rows = 1
+	}
+
+	p.mu.Lock()
+	state := p.state
+	p.mu.Unlock()
+
+	label := p.taskID
+	if label == "" {
+		label = p.id
+	}
+
+	var content string
+	if axis == axisRows {
+		// Short, wide bar: badge glyph + id + title on one line.
+		line := stateGlyph(state) + " " + label
+		if p.title != "" {
+			line += " — " + p.title
+		}
+		content = lipgloss.NewStyle().MaxWidth(cols).Render(line)
+	} else {
+		// Tall, narrow sliver: the glyph then the id stacked one rune per row.
+		lines := []string{stateGlyph(state)}
+		for _, r := range label {
+			if len(lines) >= rows {
+				break
+			}
+			lines = append(lines, string(r))
+		}
+		content = lipgloss.JoinVertical(lipgloss.Center, lines...)
+	}
+
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(borderColor(state, focused, blink)).
+		Foreground(stateColor(state)).
+		Width(cols).
+		Height(rows).
+		Render(content)
+}
+
 // headerLine renders the status badge + task id + title, the painted lipgloss
 // analogue of spawner.TaskBorderFormatWithState. width is the interior width to
-// fit within.
-func (p *Pane) headerLine(state string, width int) string {
+// fit within; blink animates the input_required badge.
+func (p *Pane) headerLine(state string, width int, blink bool) string {
 	title := p.title
 	if len(title) > 30 {
 		title = title[:27] + "..."
 	}
-	badge := stateBadge(state)
+	badge := stateBadge(state, blink)
 	line := badge
 	if p.taskID != "" {
 		line += " " + headerMetaStyle.Render(p.taskID)
@@ -342,12 +391,14 @@ func interiorRows(boxH int) int {
 // spawner.TaskBorderFormatWithState so the native pane border and the task-list
 // badge stay in visual agreement.
 var (
-	colorWorking = lipgloss.Color("78")  // green
-	colorIdle    = lipgloss.Color("214") // amber
-	colorNeeds   = lipgloss.Color("204") // pink
-	colorTesting = lipgloss.Color("39")  // cyan
-	colorDead    = lipgloss.Color("240") // grey
-	colorBadgeFg = lipgloss.Color("235") // dark text on light badge bg
+	colorWorking    = lipgloss.Color("78")  // green
+	colorIdle       = lipgloss.Color("214") // amber
+	colorNeeds      = lipgloss.Color("204") // pink
+	colorNeedsBlink = lipgloss.Color("231") // near-white, the pink badge's pulse
+	colorTesting    = lipgloss.Color("39")  // cyan
+	colorDead       = lipgloss.Color("240") // grey
+	colorFocus      = lipgloss.Color("69")  // bright blue, focused border
+	colorBadgeFg    = lipgloss.Color("235") // dark text on light badge bg
 
 	badgeBase = lipgloss.NewStyle().Foreground(colorBadgeFg).Bold(true).Padding(0, 1)
 
@@ -357,17 +408,35 @@ var (
 	badgeTestingStyle = badgeBase.Background(colorTesting)
 	badgeDeadStyle    = badgeBase.Background(colorDead)
 
+	// badgeNeedsBlinkStyle is the "on" phase of the input_required pulse: the
+	// pink badge brightens to near-white so the eye is drawn to the pane that
+	// needs the user. The "off" phase is the normal pink badgeNeedsStyle, so the
+	// badge alternates on the Manager's tick — richer than tmux's static
+	// pane-border-format string ([[T-024]]).
+	badgeNeedsBlinkStyle = badgeBase.Background(colorNeedsBlink).Foreground(colorNeeds)
+
 	headerMetaStyle  = lipgloss.NewStyle().Bold(true)
 	headerTitleStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+
+	// Tab-strip chips (Tabs layout). The active tab and a pulsing input_required
+	// tab stand out from the dim inactive ones.
+	tabInactiveStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Padding(0, 1)
+	tabActiveStyle   = lipgloss.NewStyle().Foreground(colorBadgeFg).Background(colorFocus).Bold(true).Padding(0, 1)
+	tabAlertStyle    = lipgloss.NewStyle().Foreground(colorBadgeFg).Background(colorNeeds).Bold(true).Padding(0, 1)
 )
 
 // stateBadge renders the colored status badge for a state, matching
-// ui.activeBadge's glyphs exactly.
-func stateBadge(state string) string {
+// ui.activeBadge's glyphs exactly. For input_required the badge pulses with the
+// blink phase (T-040): the "on" phase brightens the pink so it animates rather
+// than sitting static like the tmux border.
+func stateBadge(state string, blink bool) string {
 	switch state {
 	case StateIdle:
 		return badgeIdleStyle.Render("○ IDLE")
 	case StateInputRequired:
+		if blink {
+			return badgeNeedsBlinkStyle.Render("⚠ INPUT REQUIRED")
+		}
 		return badgeNeedsStyle.Render("⚠ INPUT REQUIRED")
 	case StateTesting:
 		return badgeTestingStyle.Render("⧖ TESTING")
@@ -375,5 +444,55 @@ func stateBadge(state string) string {
 		return badgeDeadStyle.Render("✗ EXITED")
 	default:
 		return badgeWorkingStyle.Render("● WORKING")
+	}
+}
+
+// stateGlyph is the bare status glyph (no background), used in the tab strip and
+// collapsed strips where a full badge won't fit. It matches stateBadge's glyphs.
+func stateGlyph(state string) string {
+	switch state {
+	case StateIdle:
+		return "○"
+	case StateInputRequired:
+		return "⚠"
+	case StateTesting:
+		return "⧖"
+	case StateDead:
+		return "✗"
+	default:
+		return "●"
+	}
+}
+
+// stateColor is the foreground colour for a state, used to tint collapsed strips.
+func stateColor(state string) lipgloss.Color {
+	switch state {
+	case StateIdle:
+		return colorIdle
+	case StateInputRequired:
+		return colorNeeds
+	case StateTesting:
+		return colorTesting
+	case StateDead:
+		return colorDead
+	default:
+		return colorWorking
+	}
+}
+
+// borderColor picks a box border colour: blue when focused, else the state
+// colour for an input_required pane (so it stands out even unfocused, pulsing
+// with blink), else dim grey.
+func borderColor(state string, focused, blink bool) lipgloss.Color {
+	switch {
+	case focused:
+		return colorFocus
+	case state == StateInputRequired:
+		if blink {
+			return colorNeedsBlink
+		}
+		return colorNeeds
+	default:
+		return lipgloss.Color("240")
 	}
 }
