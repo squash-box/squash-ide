@@ -26,6 +26,7 @@ var version = "dev"
 // Flag values, populated by cobra before RunE runs. Empty string = not set.
 var (
 	flagVault        string
+	flagEngine       string
 	flagTerminal     string
 	flagSpawnCmd     string
 	flagNoTmux       bool
@@ -44,6 +45,7 @@ func main() {
 	rootCmd.SetVersionTemplate("squash-ide {{.Version}}\n")
 
 	rootCmd.PersistentFlags().StringVar(&flagVault, "vault", "", "path to the Obsidian vault (overrides config file and env)")
+	rootCmd.PersistentFlags().StringVar(&flagEngine, "engine", "", "window-management engine: tmux (default) or native (overrides config file and env)")
 	rootCmd.PersistentFlags().StringVar(&flagTerminal, "terminal", "", "terminal emulator command (overrides config file and env)")
 	rootCmd.PersistentFlags().StringVar(&flagSpawnCmd, "spawn-cmd", "", "command to run inside spawned terminal (overrides config file and env)")
 	rootCmd.PersistentFlags().BoolVar(&flagNoTmux, "no-tmux", false, "disable tmux tiled-pane mode; spawn each task in its own OS terminal window")
@@ -139,6 +141,7 @@ to backlog, updates board/log, tears down the tmux pane).`,
 func loadConfig() (config.Config, error) {
 	return config.Load(config.Overrides{
 		Vault:        flagVault,
+		Engine:       flagEngine,
 		Terminal:     flagTerminal,
 		SpawnCmd:     flagSpawnCmd,
 		NoTmux:       flagNoTmux,
@@ -152,6 +155,28 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+
+	// Engine selection is the first fork. Log it (info) before the alt screen
+	// takes over so it scrolls in the user's scrollback / is greppable.
+	fmt.Fprintf(os.Stderr, "squash-ide: engine=%s\n", cfg.Engine)
+
+	// T-038: the native engine renders the in-process pane manager (T-037)
+	// inside the TUI. It takes a deliberately different branch from tmux mode:
+	// no session bootstrap/re-exec, no session kill, and the program gets mouse
+	// + focus-report options so panes are interactive. Spawning real task
+	// processes into the manager is T-039; here the right region is an empty
+	// (placeholder) pane region, proving render + input routing + resize.
+	if cfg.Engine == config.EngineNative {
+		m := ui.New(cfg)
+		p := tea.NewProgram(m,
+			tea.WithAltScreen(),
+			tea.WithMouseCellMotion(),
+			tea.WithReportFocus(),
+		)
+		_, err = p.Run()
+		return err
+	}
+
 	// T-011: if tmux mode is enabled and we're not already inside tmux,
 	// re-exec ourselves inside a tmux session. tmux.EnsureSession replaces
 	// the current process via syscall.Exec on success — it only returns on
@@ -203,6 +228,9 @@ func buildSelfInvocation() string {
 	parts := []string{shellQuote(os.Args[0])}
 	if flagVault != "" {
 		parts = append(parts, "--vault", shellQuote(flagVault))
+	}
+	if flagEngine != "" {
+		parts = append(parts, "--engine", shellQuote(flagEngine))
 	}
 	if flagTerminal != "" {
 		parts = append(parts, "--terminal", shellQuote(flagTerminal))

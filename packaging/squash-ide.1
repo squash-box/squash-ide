@@ -36,6 +36,15 @@ in the config file.
 .B --vault \fIPATH\fR
 Path to the Obsidian vault. Overrides config file and env.
 .TP
+.B --engine \fItmux|native\fR
+Window-management engine. The default
+.B tmux
+bootstraps a tmux session and tiles spawned task panes beside the TUI.
+.B native
+renders an in-process pane region inside the TUI with no tmux dependency
+(experimental: the region is currently an empty placeholder). Overrides
+config file and env.
+.TP
 .B --terminal \fICMD\fR
 Terminal emulator command used when
 .B --no-tmux
@@ -133,6 +142,9 @@ Example configuration file bundled with the package.
 .TP
 .B SQUASH_VAULT
 Vault directory path (overrides config file).
+.TP
+.B SQUASH_ENGINE
+Window-management engine, \fBtmux\fR or \fBnative\fR (overrides config file).
 .TP
 .B SQUASH_TERMINAL
 Terminal emulator command (overrides config file).

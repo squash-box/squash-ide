@@ -42,6 +42,18 @@ type Spawn struct {
 	Args    []string `yaml:"args"`
 }
 
+// Engine selects how spawned task processes are rendered alongside the TUI.
+//
+//   - EngineTmux (the default) bootstraps a tmux session and tiles task panes
+//     to the right of the TUI — the shipping v2 workflow (T-011).
+//   - EngineNative renders the in-process internal/pane manager (T-037) inside
+//     the TUI itself, with no tmux dependency. It is opt-in until the explicit
+//     cutover in T-041; defaulting to tmux keeps `main` behaviour unchanged.
+const (
+	EngineTmux   = "tmux"
+	EngineNative = "native"
+)
+
 // Tmux controls the v2 single-terminal tiled-pane workflow (T-011).
 // When Enabled, squash-ide bootstraps a tmux session and opens spawned tasks
 // as new panes to the right of the TUI instead of new OS terminal windows.
@@ -56,12 +68,13 @@ type Tmux struct {
 // Config is the resolved squash-ide configuration.
 type Config struct {
 	Vault    string   `yaml:"vault"`
+	Engine   string   `yaml:"engine"`
 	Terminal Terminal `yaml:"terminal"`
 	Spawn    Spawn    `yaml:"spawn"`
 	Tmux     Tmux     `yaml:"tmux"`
 
 	// Sources records the provenance of each resolved field.
-	// Keys: "vault", "terminal.command", "terminal.args",
+	// Keys: "vault", "engine", "terminal.command", "terminal.args",
 	// "spawn.command", "spawn.args",
 	// "tmux.enabled", "tmux.session_name", "tmux.tui_width", "tmux.min_pane_width".
 	Sources map[string]Source `yaml:"-"`
@@ -74,6 +87,7 @@ type Config struct {
 // Empty fields are treated as "not provided" and skipped.
 type Overrides struct {
 	Vault    string
+	Engine   string
 	Terminal string
 	SpawnCmd string
 
@@ -93,7 +107,8 @@ type Overrides struct {
 // flag provides a value.
 func Defaults() Config {
 	return Config{
-		Vault: "~/GIT/agentic/tasks/personal/",
+		Vault:  "~/GIT/agentic/tasks/personal/",
+		Engine: EngineTmux,
 		Terminal: Terminal{
 			// Empty = auto-detect (preserves T-007's terminal detection).
 			Command: "",
@@ -112,6 +127,7 @@ func Defaults() Config {
 		},
 		Sources: map[string]Source{
 			"vault":               SourceDefault,
+			"engine":              SourceDefault,
 			"terminal.command":    SourceDefault,
 			"terminal.args":       SourceDefault,
 			"spawn.command":       SourceDefault,
@@ -156,6 +172,13 @@ func Load(ov Overrides) (Config, error) {
 
 	applyEnv(&cfg)
 	applyOverrides(&cfg, ov)
+
+	// Validate the resolved engine here (not in Validate) so an unknown value
+	// fails config load itself — the earliest, clearest place to reject it.
+	if cfg.Engine != EngineTmux && cfg.Engine != EngineNative {
+		return Config{}, fmt.Errorf("invalid engine %q (%s): must be %q or %q",
+			cfg.Engine, source(cfg, "engine"), EngineTmux, EngineNative)
+	}
 
 	// If no layer supplied an explicit tmux.session_name, derive one from the
 	// resolved vault so each vault gets its own tmux session and two concurrent
@@ -204,6 +227,7 @@ type fileTmux struct {
 // but uses pointers / sentinel zeros where needed for presence detection.
 type fileConfig struct {
 	Vault    string    `yaml:"vault"`
+	Engine   string    `yaml:"engine"`
 	Terminal Terminal  `yaml:"terminal"`
 	Spawn    Spawn     `yaml:"spawn"`
 	Tmux     *fileTmux `yaml:"tmux"`
@@ -229,6 +253,10 @@ func applyFile(cfg *Config, path string) error {
 	if fc.Vault != "" {
 		cfg.Vault = fc.Vault
 		cfg.Sources["vault"] = SourceFile
+	}
+	if fc.Engine != "" {
+		cfg.Engine = fc.Engine
+		cfg.Sources["engine"] = SourceFile
 	}
 	if fc.Terminal.Command != "" {
 		cfg.Terminal.Command = fc.Terminal.Command
@@ -277,6 +305,10 @@ func applyEnv(cfg *Config) {
 		cfg.Vault = v
 		cfg.Sources["vault"] = SourceEnv
 	}
+	if v := os.Getenv("SQUASH_ENGINE"); v != "" {
+		cfg.Engine = v
+		cfg.Sources["engine"] = SourceEnv
+	}
 	if v := os.Getenv("SQUASH_TERMINAL"); v != "" {
 		cfg.Terminal.Command = v
 		cfg.Sources["terminal.command"] = SourceEnv
@@ -292,6 +324,10 @@ func applyOverrides(cfg *Config, ov Overrides) {
 	if ov.Vault != "" {
 		cfg.Vault = ov.Vault
 		cfg.Sources["vault"] = SourceFlag
+	}
+	if ov.Engine != "" {
+		cfg.Engine = ov.Engine
+		cfg.Sources["engine"] = SourceFlag
 	}
 	if ov.Terminal != "" {
 		cfg.Terminal.Command = ov.Terminal
@@ -352,6 +388,7 @@ func (c Config) Format() string {
 		fmt.Fprintf(&b, "# config file: %s\n", c.Path)
 	}
 	fmt.Fprintf(&b, "vault: %s (from %s)\n", c.Vault, source(c, "vault"))
+	fmt.Fprintf(&b, "engine: %s (from %s)\n", c.Engine, source(c, "engine"))
 	fmt.Fprintf(&b, "terminal.command: %s (from %s)\n", terminalCommandDisplay(c), source(c, "terminal.command"))
 	fmt.Fprintf(&b, "terminal.args: %v (from %s)\n", c.Terminal.Args, source(c, "terminal.args"))
 	fmt.Fprintf(&b, "spawn.command: %s (from %s)\n", c.Spawn.Command, source(c, "spawn.command"))

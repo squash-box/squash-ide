@@ -213,6 +213,34 @@ width so their prompts remain legible.
 To exit compact mode, widen the terminal past 300 cols or deactivate one
 of the active tasks (`d` key) so only a single task remains active.
 
+### Engine — tmux vs native (experimental)
+
+squash-ide has two window-management **engines**, selected by the `engine`
+config key (`--engine` flag / `SQUASH_ENGINE` env):
+
+| `engine`         | Behaviour                                                       |
+|------------------|----------------------------------------------------------------|
+| `tmux` (default) | Bootstraps a tmux session and tiles spawned task panes to the right of the TUI — the shipping workflow described above. |
+| `native`         | Renders an in-process pane region **inside** the TUI itself, with no tmux dependency. |
+
+```bash
+squash-ide --engine native
+```
+
+In native mode the TUI draws the task list on the left and the native pane
+region on the right, joined at full terminal width — no tmux session is
+created. Press `Ctrl+W` to hand keyboard focus to the pane region (keys then
+route to the focused pane) and `Ctrl+W` again to return focus to the list;
+`Ctrl+C` always quits. Resizing the terminal reflows the region in-process.
+
+**Current limitations.** Native mode is opt-in and incomplete: the pane region
+is presently an **empty placeholder** — spawning real task processes into it
+(so `Enter` launches Claude in a native pane instead of a tmux one) lands in a
+follow-up task. Until then, `native` is useful for previewing the layout and
+input routing, while `tmux` remains the default and the recommended daily
+surface. The two engines are independent of `--no-tmux`, which only affects the
+`tmux` engine's fallback to OS windows.
+
 ### List tasks (JSON)
 
 ```bash
@@ -282,6 +310,7 @@ Default config path: `$XDG_CONFIG_HOME/squash-ide/config.yaml` (usually
 
 ```yaml
 vault: ~/GIT/agentic/tasks/personal
+engine: tmux        # tmux (default) | native (experimental, see Engine above)
 terminal:
   command: ""      # empty = auto-detect ptyxis → gnome-terminal → x-terminal-emulator
   args: ["--working-directory={cwd}", "--", "bash", "-c", "{exec}"]
@@ -300,6 +329,7 @@ Environment variables (override file):
 | Var                | Effect                                 |
 |--------------------|----------------------------------------|
 | `SQUASH_VAULT`     | vault directory                        |
+| `SQUASH_ENGINE`    | window-management engine (`tmux`/`native`) |
 | `SQUASH_TERMINAL`  | terminal emulator command              |
 | `SQUASH_SPAWN_CMD` | command to run inside spawned terminal |
 
@@ -308,6 +338,7 @@ CLI flags (override env):
 | Flag                | Effect                              |
 |---------------------|-------------------------------------|
 | `--vault`           | vault directory                     |
+| `--engine`          | window-management engine (`tmux`/`native`) |
 | `--terminal`        | terminal emulator command           |
 | `--spawn-cmd`       | command to run inside spawned terminal |
 | `--no-tmux`         | disable tmux tiled-pane mode        |
