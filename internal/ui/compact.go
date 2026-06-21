@@ -18,6 +18,15 @@ const (
 	CompactListWidth       = 20
 )
 
+// fullChromeMinWidth is the narrowest list width that still renders the full
+// chrome (full top bar, expanded cards, long help). Below it the list switches
+// to the compact layout. It sits well under tuiWidth so the responsive list
+// keeps its full appearance across most of its range — the compact shape only
+// engages near the CompactListWidth floor, where expanded card titles get too
+// cramped (~10 cols) to read. Overflow above this (e.g. a multi-count top bar)
+// is truncated by listViewRender's clamp rather than forcing compact early.
+const fullChromeMinWidth = 30
+
 // isCompact reports whether compact mode should be active. Returns false
 // while any modal dialog is open — dialogs take over the pane and need
 // the normal width to render legibly, so compact stands down until the
@@ -54,25 +63,43 @@ func (m Model) isCompact() bool {
 	return activeTaskCount(m.allTasks) >= CompactMinActiveSpawns
 }
 
-// nativeListCompact reports whether the native engine should collapse the task
-// list to CompactListWidth. Unlike isCompact (a tmux-pane behaviour, always
-// false under native), this is space-driven: the list shrinks when the full
-// list plus a usable pane region won't fit the terminal, freeing
-// TUIWidth-CompactListWidth columns for the panes before they reflow (T-040).
+// nativeListWidth computes the responsive width of the native task list. The
+// list scales linearly with the terminal between CompactListWidth (its floor)
+// and tuiWidth (its ceiling), always reserving paneGutter+nativeMinPaneWidth
+// for the pane region so spawned windows keep a usable minimum. Wide terminals
+// park the list at its ceiling and hand every extra column to the panes; narrow
+// ones shrink it toward the compact floor. This supersedes the binary T-052
+// collapse, which snapped straight from full to CompactListWidth.
 //
-// It is the single source of truth for "the native list renders narrow" —
-// rightRegion's pane-region calc, nativeView's too-narrow gate, and
-// listViewRender's width branch all consume it, so the rendered list and the
-// reserved region can never disagree.
+// It is the single source of truth for the native list's rendered width:
+// rightRegion derives the pane region from it and listViewRender renders the
+// list at it, so the reserved region and the rendered list can never disagree.
+func (m Model) nativeListWidth() int {
+	full := m.tuiWidth()
+	if !m.engineNative || m.width <= 0 {
+		return full
+	}
+	w := m.width - paneGutter - nativeMinPaneWidth
+	if w > full {
+		w = full
+	}
+	if w < CompactListWidth {
+		w = CompactListWidth
+	}
+	return w
+}
+
+// nativeListCompact reports whether the native list renders below its full
+// (tuiWidth) ceiling — i.e. the terminal is narrow enough that the responsive
+// list has ceded columns to the panes. It is a thin predicate over
+// nativeListWidth; note the *chrome* switches to its compact layout at a lower
+// width than this (see listViewRender), so a true result here does not by
+// itself mean condensed cards.
 func (m Model) nativeListCompact() bool {
 	if !m.engineNative {
 		return false
 	}
-	full := m.tuiWidth()
-	if full <= CompactListWidth {
-		return false
-	}
-	return m.width > 0 && m.width < full+paneGutter+nativeMinPaneWidth
+	return m.nativeListWidth() < m.tuiWidth()
 }
 
 // refreshWindowWidth queries tmux for the outer window column count and
