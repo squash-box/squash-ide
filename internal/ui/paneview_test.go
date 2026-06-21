@@ -50,15 +50,10 @@ type stubManager struct {
 	collapseToggles int
 	ticks           int
 
-	// T-050 modal-popover recording.
-	modalSpawns     []pane.SpawnSpec
-	modalBoxes      []pane.Rect
-	modalSpawnErr   error // when set, SpawnModal returns it (exercises the error path)
-	hasModal        bool
-	writtenToModal  [][]byte
-	modalResizes    []pane.Rect
-	closeModalCount int
-	modalDone       chan struct{}
+	// T-054 log-task tab recording. Spawn registers a child-exit channel per
+	// task id so DoneByTask(id) returns non-nil, mirroring a real spawned pane;
+	// a test closes it to simulate the child exiting.
+	doneChans map[string]chan struct{}
 }
 
 func newStubManager() *stubManager {
@@ -66,7 +61,7 @@ func newStubManager() *stubManager {
 		repaint:   make(chan struct{}, 1),
 		states:    map[string]string{},
 		canSpawn:  true,
-		modalDone: make(chan struct{}),
+		doneChans: map[string]chan struct{}{},
 	}
 }
 
@@ -93,11 +88,25 @@ func (s *stubManager) Spawn(spec pane.SpawnSpec) (*pane.Pane, error) {
 	if s.spawnErr != nil {
 		return nil, s.spawnErr
 	}
+	// Register a child-exit channel so DoneByTask(id) returns non-nil — the
+	// native /log-task tab watcher waits on it (T-054).
+	if s.doneChans != nil && spec.TaskID != "" {
+		if _, ok := s.doneChans[spec.TaskID]; !ok {
+			s.doneChans[spec.TaskID] = make(chan struct{})
+		}
+	}
 	return nil, nil // the Model ignores the returned pane
 }
 
 func (s *stubManager) CloseByTask(taskID string) error {
 	s.closedTasks = append(s.closedTasks, taskID)
+	return nil
+}
+
+func (s *stubManager) DoneByTask(taskID string) <-chan struct{} {
+	if ch, ok := s.doneChans[taskID]; ok {
+		return ch
+	}
 	return nil
 }
 
@@ -144,34 +153,6 @@ func (s *stubManager) FocusNext()                   { s.focusNextCount++ }
 func (s *stubManager) FocusPrev()                   { s.focusPrevCount++ }
 func (s *stubManager) ToggleCollapseFocused()       { s.collapseToggles++ }
 func (s *stubManager) Tick()                        { s.ticks++ }
-
-func (s *stubManager) SpawnModal(spec pane.SpawnSpec, box pane.Rect) (*pane.Pane, error) {
-	s.modalSpawns = append(s.modalSpawns, spec)
-	s.modalBoxes = append(s.modalBoxes, box)
-	if s.modalSpawnErr != nil {
-		return nil, s.modalSpawnErr
-	}
-	s.hasModal = true
-	return nil, nil // the Model never dereferences the returned pane in tests
-}
-
-func (s *stubManager) ModalPane() *pane.Pane { return nil }
-func (s *stubManager) HasModal() bool        { return s.hasModal }
-
-func (s *stubManager) WriteToModal(b []byte) (int, error) {
-	cp := append([]byte(nil), b...)
-	s.writtenToModal = append(s.writtenToModal, cp)
-	return len(b), nil
-}
-
-func (s *stubManager) ModalDone() <-chan struct{} { return s.modalDone }
-func (s *stubManager) ResizeModal(box pane.Rect)  { s.modalResizes = append(s.modalResizes, box) }
-
-func (s *stubManager) CloseModal() error {
-	s.closeModalCount++
-	s.hasModal = false
-	return nil
-}
 
 // nativeModel builds a native-engine Model wired to a stub manager, pre-loaded
 // with tasks and a default size, ready to drive through Update/View directly.
@@ -944,7 +925,6 @@ func TestMouse_IgnoredWhileModal(t *testing.T) {
 		{"spawn confirm", func(m *Model) { m.confirming = &task.Task{ID: "T-001"} }},
 		{"filter active", func(m *Model) { m.filterActive = true }},
 		{"detail view", func(m *Model) { m.view = detailView }},
-		{"log-task popover", func(m *Model) { m.logTaskPopover = true }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

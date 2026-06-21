@@ -123,6 +123,43 @@ func TestManager_CanSpawn(t *testing.T) {
 	}
 }
 
+func TestManager_DoneByTask(t *testing.T) {
+	fake := newFakePTY(t)
+	m := NewManager(WithStarter(fake))
+	m.Resize(wideRegion)
+
+	p, err := m.Spawn(SpawnSpec{Command: fakeCmd("claude"), TaskID: "log-task-1"})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+
+	done := m.DoneByTask("log-task-1")
+	if done == nil {
+		t.Fatal("DoneByTask should return the live pane's exit channel")
+	}
+	select {
+	case <-done:
+		t.Fatal("Done channel closed before the child exited")
+	default:
+	}
+
+	// Killing the child (Close) EOFs the master and closes Done — the auto-close
+	// watcher's wake-up edge.
+	if err := m.Close(p.ID()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	select {
+	case <-done:
+	default:
+		t.Error("Done channel should be closed after the child exits")
+	}
+
+	// Unknown id returns a nil channel (waitForLogTaskExit treats it as a no-op).
+	if ch := m.DoneByTask("nope"); ch != nil {
+		t.Error("DoneByTask(unknown) should return a nil channel")
+	}
+}
+
 func TestManager_HasPaneForTask(t *testing.T) {
 	fake := newFakePTY(t)
 	m := NewManager(WithStarter(fake))

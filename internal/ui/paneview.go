@@ -31,8 +31,12 @@ type paneManager interface {
 
 	// Spawn launches spec.Command in a new pane (Enter-to-spawn).
 	Spawn(spec pane.SpawnSpec) (*pane.Pane, error)
-	// CloseByTask tears down the pane running taskID (complete / deactivate).
+	// CloseByTask tears down the pane running taskID (complete / deactivate, and
+	// the /log-task tab auto-close, T-054).
 	CloseByTask(taskID string) error
+	// DoneByTask returns the child-exit channel of the pane running taskID (nil
+	// for an unknown id) — the seam the /log-task tab auto-close waits on (T-054).
+	DoneByTask(taskID string) <-chan struct{}
 	// FocusByTask focuses the pane running taskID (notify-click focus).
 	FocusByTask(taskID string) error
 	// TaskAtPoint maps an absolute screen cell to the task id of the pane there,
@@ -66,24 +70,6 @@ type paneManager interface {
 	ToggleCollapseFocused()
 	// Tick advances the input_required badge-blink phase.
 	Tick()
-
-	// T-050 modal popover surface — a single floating pane composited over the
-	// tiled region for the native /log-task session.
-
-	// SpawnModal starts spec.Command in the floating modal slot sized to box.
-	SpawnModal(spec pane.SpawnSpec, box pane.Rect) (*pane.Pane, error)
-	// ModalPane returns the open modal pane (nil if none) for the overlay render.
-	ModalPane() *pane.Pane
-	// HasModal reports whether a modal popover is open.
-	HasModal() bool
-	// WriteToModal forwards raw input bytes to the modal's child (no-op if none).
-	WriteToModal(b []byte) (int, error)
-	// ModalDone returns the modal child's exit channel (nil if no modal).
-	ModalDone() <-chan struct{}
-	// ResizeModal best-effort resizes the modal child to a new box geometry.
-	ResizeModal(box pane.Rect)
-	// CloseModal terminates + clears the modal (idempotent no-op if none).
-	CloseModal() error
 }
 
 // paneGutter is the blank-column separator between the task list and the
@@ -156,37 +142,38 @@ func (m Model) nativeView() string {
 	gap := lipgloss.NewStyle().Width(paneGutter).Render("")
 	joined := lipgloss.JoinHorizontal(lipgloss.Top, left, gap, right)
 
-	// T-050: the /log-task popover is composited *over* the joined view so the
-	// spawned panes stay visible behind it — unlike the takeover the tmux engine
-	// still uses. Only engages while a modal is open.
-	if m.manager.HasModal() {
-		if mp := m.manager.ModalPane(); mp != nil {
-			box := m.popoverBox()
-			over := mp.Render(box.W, box.H, true, false)
-			joined = placeOverlay(box.X, box.Y, over, joined)
-		}
+	// T-054: the add-task form is a floating modal composited *over* the joined
+	// view, so the list and any running /log-task tabs stay visible behind it —
+	// not the fullscreen takeover the tmux engine still uses (listViewRender's
+	// fullscreen form block is gated out under native). It reuses the T-050
+	// overlay compositor + centered-box geometry; the form is a pure render, so it
+	// needs no PTY modal slot (that machinery is gone).
+	if m.creatingTask != nil {
+		box := m.formBox()
+		over := m.creatingTask.view(box.W, box.H)
+		joined = placeOverlay(box.X, box.Y, over, joined)
 	}
 	return joined
 }
 
-// maxPopoverWidth / maxPopoverHeight cap the /log-task popover so it never grows
-// to the full terminal on a large screen — it should read as a centered modal
-// with the spawned panes framing it. Below the cap it tracks the terminal at
-// ~90%/80% (see popoverBox).
+// maxFormWidth / maxFormHeight cap the add-task form modal so it never grows to
+// the full terminal on a large screen — it should read as a centered dialog with
+// the list and spawned panes framing it. Below the cap it tracks the terminal at
+// ~90%/80% (see formBox).
 const (
-	maxPopoverWidth  = 100
-	maxPopoverHeight = 40
+	maxFormWidth  = 100
+	maxFormHeight = 40
 )
 
-// popoverBox computes the centered bounding box (border included) for the
-// /log-task popover: ~90% of the terminal width and ~80% of its height, each
-// capped, and never larger than the terminal. The same box drives both the PTY
-// child's interior size (SpawnModal/ResizeModal) and the overlay position, so
-// they always agree.
-func (m Model) popoverBox() pane.Rect {
+// formBox computes the centered bounding box (border included) for the add-task
+// form modal (T-054): ~90% of the terminal width and ~80% of its height, each
+// capped, and never larger than the terminal. It drives both the form's render
+// size and the overlay position, so they always agree. (Geometry inherited from
+// the superseded T-050 popover box.)
+func (m Model) formBox() pane.Rect {
 	w := m.width * 9 / 10
-	if w > maxPopoverWidth {
-		w = maxPopoverWidth
+	if w > maxFormWidth {
+		w = maxFormWidth
 	}
 	if w > m.width {
 		w = m.width
@@ -195,8 +182,8 @@ func (m Model) popoverBox() pane.Rect {
 		w = 1
 	}
 	h := m.height * 8 / 10
-	if h > maxPopoverHeight {
-		h = maxPopoverHeight
+	if h > maxFormHeight {
+		h = maxFormHeight
 	}
 	if h > m.height {
 		h = m.height

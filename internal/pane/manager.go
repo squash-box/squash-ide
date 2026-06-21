@@ -38,12 +38,6 @@ type Manager struct {
 	starter     ptyStarter
 	nextID      int
 
-	// modal is a single floating pane composited *over* the tiled region (the
-	// /log-task popover, T-050). It is deliberately kept out of m.panes so no
-	// layout Strategy ever tiles it — a popover floats, it isn't a column. Only
-	// one may be open at a time; SpawnModal rejects a second.
-	modal *Pane
-
 	// collapsed marks panes shown as a thin strip rather than a full box
 	// (T-040). Keyed by pane id; toggling reflows the siblings.
 	collapsed map[string]bool
@@ -236,6 +230,23 @@ func (m *Manager) FocusByTask(taskID string) error {
 	id := m.panes[idx].id
 	m.mu.Unlock()
 	return m.Focus(id)
+}
+
+// DoneByTask returns the child-exit channel of the pane running taskID, or a nil
+// channel when no live pane has that id. It is the seam the native /log-task tab
+// auto-close watches (T-054): a tea.Cmd blocks on it and, when claude exits,
+// closes the tab. Task-id-keyed like CloseByTask/FocusByTask so the UI's
+// paneManager interface stays decoupled from *Pane. A receive on the nil channel
+// returned for an unknown id blocks forever, so the UI only waits on the id a
+// successful Spawn just returned.
+func (m *Manager) DoneByTask(taskID string) <-chan struct{} {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	idx := m.indexOfTaskLocked(taskID)
+	if idx < 0 {
+		return nil
+	}
+	return m.panes[idx].Done()
 }
 
 // SetStateByTask updates the lifecycle state of the pane running taskID, driving
@@ -605,117 +616,6 @@ func (m *Manager) Panes() []*Pane {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return append([]*Pane(nil), m.panes...)
-}
-
-// --- modal popover (T-050) --------------------------------------------------
-//
-// A modal is a single PTY pane composited *over* the tiled region rather than
-// laid out within it (the /log-task popover). It reuses the same starter seam,
-// newPane constructor, and repaint channel as Spawn, but is stored in m.modal
-// and never appended to m.panes, so no Strategy ever tiles it.
-
-// SpawnModal starts spec.Command in the floating modal slot, sized to the
-// popover box's interior so the child reflows to the box. It errors if a modal
-// is already open (single-slot only), leaving the existing one intact. Focus is
-// untouched — the UI routes keys to the modal via WriteToModal while the popover
-// flag is set, independent of pane focus.
-func (m *Manager) SpawnModal(spec SpawnSpec, box Rect) (*Pane, error) {
-	if spec.Command == nil {
-		return nil, fmt.Errorf("pane: SpawnModal requires a Command")
-	}
-
-	m.mu.Lock()
-	if m.modal != nil {
-		m.mu.Unlock()
-		return nil, fmt.Errorf("pane: a modal is already open")
-	}
-	master, proc, err := m.starter.Start(spec.Command)
-	if err != nil {
-		m.mu.Unlock()
-		return nil, fmt.Errorf("pane: starting modal %q on a pty: %w", cmdName(spec.Command), err)
-	}
-	m.nextID++
-	id := fmt.Sprintf("modal-%d", m.nextID)
-	setsize := func(rows, cols uint16) error { return m.starter.Setsize(master, rows, cols) }
-	cols, rows := interiorCols(box.W), interiorRows(box.H)
-	p := newPane(id, spec.TaskID, spec.Title, spec.Project, master, proc, cols, rows, setsize, m.requestRepaint)
-	m.modal = p
-	m.mu.Unlock()
-
-	// Size the child to the popover interior so claude lays out to the box.
-	p.Resize(rows, cols)
-	debugf("manager: spawned modal %s (task %s) at %dx%d", id, spec.TaskID, box.W, box.H)
-	m.requestRepaint()
-	return p, nil
-}
-
-// ModalPane returns the open modal pane, or nil. The UI needs the concrete pane
-// to render its box for the overlay composite.
-func (m *Manager) ModalPane() *Pane {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.modal
-}
-
-// HasModal reports whether a modal popover is currently open.
-func (m *Manager) HasModal() bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.modal != nil
-}
-
-// WriteToModal forwards raw input bytes (from EncodeKey) to the modal's child
-// PTY. It is a no-op (0, nil) when no modal is open, mirroring WriteToFocused so
-// the UI's popover key router can forward unconditionally.
-func (m *Manager) WriteToModal(b []byte) (int, error) {
-	m.mu.Lock()
-	p := m.modal
-	m.mu.Unlock()
-	if p == nil {
-		return 0, nil
-	}
-	return p.Write(b)
-}
-
-// ModalDone returns the modal child's exit channel (closed when claude exits),
-// or a nil channel when no modal is open — a receive on which blocks forever, so
-// the UI only calls this after a successful SpawnModal.
-func (m *Manager) ModalDone() <-chan struct{} {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.modal == nil {
-		return nil
-	}
-	return m.modal.Done()
-}
-
-// ResizeModal best-effort resizes the modal child to a new popover box's
-// interior (e.g. on a terminal resize). A no-op when no modal is open.
-func (m *Manager) ResizeModal(box Rect) {
-	m.mu.Lock()
-	p := m.modal
-	m.mu.Unlock()
-	if p == nil {
-		return
-	}
-	p.Resize(interiorRows(box.H), interiorCols(box.W))
-}
-
-// CloseModal terminates the modal child, reaps it, and clears the slot. It is an
-// idempotent no-op when no modal is open, so a force-close after the child has
-// already auto-exited is safe (double-close).
-func (m *Manager) CloseModal() error {
-	m.mu.Lock()
-	p := m.modal
-	m.modal = nil
-	m.mu.Unlock()
-	if p == nil {
-		return nil
-	}
-	err := p.Close()
-	debugf("manager: closed modal %s", p.ID())
-	m.requestRepaint()
-	return err
 }
 
 // applyLayoutLocked resizes each pane to its laid-out rect. Collapsed panes are
