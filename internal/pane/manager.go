@@ -333,6 +333,67 @@ func (m *Manager) FocusedTaskID() string {
 	return ""
 }
 
+// TaskAtPoint maps an absolute screen cell (x, y) to the task id of the pane
+// rendered there. It recomputes the live geometry from the retained region via
+// the pure computeRects rather than caching a rects slice on the Manager —
+// avoiding a second source of truth and the Render/Resize-vs-cache staleness
+// window, at the cost of one extra layout pass per call (negligible against a
+// human click rate). It returns ("", false) when no addressable pane covers the
+// point: no panes, an un-sized region, a layout the region can't admit, a click
+// in the gutter / tab strip, or a placeholder pane with no task id.
+//
+// It is the geometry seam click-to-focus is built on (T-051): the UI turns a
+// tea.MouseMsg's absolute coords into a *task id*, then drives FocusByTask — the
+// task-id-keyed focus API the rest of the UI already uses (T-039), so the UI
+// never handles internal pane ids. tea.MouseMsg.X/Y and Rect are both in 0-based
+// absolute screen cells, so the contains-test needs no offset translation.
+func (m *Manager) TaskAtPoint(x, y int) (string, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if len(m.panes) == 0 || m.region.W <= 0 || m.region.H <= 0 {
+		return "", false
+	}
+	rects, axis, err := computeRects(m.strategy, m.region, m.panes, m.collapsed, m.constraints)
+	if err != nil {
+		// Mirror Render/Resize's swallow-and-degrade ([[T-031]] best-effort idiom):
+		// a stray click while the region is mid-shrink must never crash the TUI.
+		warnf("manager: TaskAtPoint layout rejected (swallowed): %v", err)
+		return "", false
+	}
+
+	// Tabbed: every rect is the identical content area, so a positional scan would
+	// always pick index 0. Only the active tab is visible — a hit in the content
+	// area resolves to it (composeTabs' tabsActiveIndex: the focused pane, or the
+	// first when focus is elsewhere); a click in the tab strip above the content is
+	// not a pane click (tab-strip click-to-select is out of scope, T-051).
+	if axis == axisTabbed {
+		r := rects[0]
+		if x >= r.X && x < r.X+r.W && y >= r.Y && y < r.Y+r.H {
+			if id := m.panes[tabsActiveIndex(m.panes, m.focusID)].taskID; id != "" {
+				return id, true
+			}
+		}
+		return "", false
+	}
+
+	// Linear (columns / rows): the first rect whose half-open bounds contain the
+	// point. Half-open (x < r.X+r.W) puts a cell exactly on a rect's far edge in
+	// the next pane / the gutter, never double-counted.
+	for i, r := range rects {
+		if i >= len(m.panes) {
+			break
+		}
+		if x >= r.X && x < r.X+r.W && y >= r.Y && y < r.Y+r.H {
+			if id := m.panes[i].taskID; id != "" {
+				return id, true
+			}
+			return "", false
+		}
+	}
+	return "", false
+}
+
 // SetStrategy swaps the active layout strategy and re-tiles. It is the runtime
 // half of the T-037 Open/Closed seam: the cycle-layout keybinding switches
 // columns→stack→tabs→responsive without the Manager knowing the concrete types.

@@ -35,6 +35,9 @@ type paneManager interface {
 	CloseByTask(taskID string) error
 	// FocusByTask focuses the pane running taskID (notify-click focus).
 	FocusByTask(taskID string) error
+	// TaskAtPoint maps an absolute screen cell to the task id of the pane there,
+	// or ("", false) when no addressable pane covers it (click-to-focus, T-051).
+	TaskAtPoint(x, y int) (string, bool)
 	// FocusedTaskID returns the task id of the focused pane, or "" if none is
 	// focused — used to record which pane the user dismissed with ctrl+w (T-048).
 	FocusedTaskID() string

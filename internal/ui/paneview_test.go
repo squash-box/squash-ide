@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 
@@ -31,6 +32,10 @@ type stubManager struct {
 	focusErr    error             // when set, FocusByTask returns it (pane died between tick and focus)
 	states      map[string]string // taskID -> last state set
 	canSpawn    bool
+
+	// T-051 mouse hit-test scripting: when set, TaskAtPoint delegates to it so a
+	// test can map a synthetic (x, y) to a chosen task id (or a miss). Nil => miss.
+	taskAtPoint func(x, y int) (string, bool)
 
 	// T-040 layout-control recording.
 	strategy        pane.Strategy
@@ -99,6 +104,13 @@ func (s *stubManager) FocusByTask(taskID string) error {
 }
 
 func (s *stubManager) FocusedTaskID() string { return s.focusedTask }
+
+func (s *stubManager) TaskAtPoint(x, y int) (string, bool) {
+	if s.taskAtPoint != nil {
+		return s.taskAtPoint(x, y)
+	}
+	return "", false
+}
 
 func (s *stubManager) SetStateByTask(taskID, state string) { s.states[taskID] = state }
 
@@ -604,5 +616,219 @@ func TestFocusFollowsInput_FocusByTaskErrLeavesFocus(t *testing.T) {
 	m = tickStatusInput(t, m, "T-003", pane.StateInputRequired)
 	if m.paneFocused {
 		t.Error("a FocusByTask error must leave the UI focus on the list")
+	}
+}
+
+// --- T-051: click a native pane to focus it ---
+
+// hitAt scripts the stub's TaskAtPoint to return (id, true) for any coordinate;
+// "" scripts a miss (click on the list / gutter / tab strip).
+func hitAt(mgr *stubManager, id string) {
+	if id == "" {
+		mgr.taskAtPoint = func(int, int) (string, bool) { return "", false }
+		return
+	}
+	mgr.taskAtPoint = func(int, int) (string, bool) { return id, true }
+}
+
+// press drives a left-button mouse press at (x, y) through the model.
+func press(t *testing.T, m Model, x, y int) Model {
+	t.Helper()
+	out, _ := m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: x, Y: y})
+	return out.(Model)
+}
+
+// Click on an unfocused pane while the list owns focus: it acquires focus on the
+// hit task and consumes the press (no forward to the child).
+func TestMouse_ClickFocusesPane(t *testing.T) {
+	mgr := newStubManager()
+	m := nativeModel(t, mgr)
+	hitAt(mgr, "T-003")
+
+	m = press(t, m, 120, 5)
+
+	if !m.paneFocused {
+		t.Error("clicking a pane should hand the UI focus to the pane region")
+	}
+	if mgr.focusedTask != "T-003" {
+		t.Errorf("FocusByTask = %q, want T-003", mgr.focusedTask)
+	}
+	if len(mgr.writes) != 0 {
+		t.Errorf("focus-acquire press must not be forwarded to the child, got %d writes", len(mgr.writes))
+	}
+}
+
+// A press on the already-focused pane forwards to the child via EncodeMouse,
+// leaving focus unchanged. Asserts the exact SGR bytes for the press coordinates.
+func TestMouse_ForwardsToFocusedChild(t *testing.T) {
+	mgr := newStubManager()
+	mgr.focusedTask = "T-003"
+	m := nativeModel(t, mgr)
+	m.paneFocused = true
+	hitAt(mgr, "T-003")
+
+	m = press(t, m, 120, 5)
+
+	if !m.paneFocused || mgr.focusedTask != "T-003" {
+		t.Errorf("focus should be unchanged: paneFocused=%v focused=%q", m.paneFocused, mgr.focusedTask)
+	}
+	if len(mgr.writes) != 1 {
+		t.Fatalf("expected one forwarded write, got %d", len(mgr.writes))
+	}
+	// SGR: left press (Cb 0), coords 1-based → X 120 -> 121, Y 5 -> 6, terminator M.
+	want := []byte("\x1b[<0;121;6M")
+	if !bytes.Equal(mgr.writes[0], want) {
+		t.Errorf("forwarded bytes = %q, want %q", mgr.writes[0], want)
+	}
+}
+
+// A click that hits no pane (the list, gutter, or tab strip) is a no-op: focus is
+// unchanged and nothing is forwarded.
+func TestMouse_MissIsNoOp(t *testing.T) {
+	mgr := newStubManager()
+	m := nativeModel(t, mgr)
+	hitAt(mgr, "") // miss
+
+	m = press(t, m, 1, 1)
+
+	if m.paneFocused {
+		t.Error("a click that hits no pane must not change focus")
+	}
+	if mgr.focusedTask != "" || len(mgr.writes) != 0 {
+		t.Errorf("a miss must not focus or forward: focused=%q writes=%d", mgr.focusedTask, len(mgr.writes))
+	}
+}
+
+// Clicking switches focus between two panes: focusing A then clicking B calls
+// FocusByTask(B) and leaves the pane region focused.
+func TestMouse_SwitchesFocusBetweenPanes(t *testing.T) {
+	mgr := newStubManager()
+	mgr.focusedTask = "T-001"
+	m := nativeModel(t, mgr)
+	m.paneFocused = true
+	hitAt(mgr, "T-003") // click lands on the other pane
+
+	m = press(t, m, 120, 5)
+
+	if !m.paneFocused {
+		t.Error("switching focus by click should keep the pane region focused")
+	}
+	if mgr.focusedTask != "T-003" {
+		t.Errorf("FocusByTask = %q, want T-003", mgr.focusedTask)
+	}
+	if len(mgr.writes) != 0 {
+		t.Errorf("a focus switch must not forward the press, got %d writes", len(mgr.writes))
+	}
+}
+
+// A click re-arms focus-follows-input for a pane the user had dismissed with
+// ctrl+w — a deliberate gesture overrides the standing-prompt suppression (T-048).
+func TestMouse_ClickReArmsDismissedFocus(t *testing.T) {
+	mgr := newStubManager()
+	m := nativeModel(t, mgr)
+	m.dismissedFocus = map[string]bool{"T-003": true}
+	hitAt(mgr, "T-003")
+
+	m = press(t, m, 120, 5)
+
+	if m.dismissedFocus["T-003"] {
+		t.Error("clicking a dismissed pane should clear its dismissedFocus entry")
+	}
+}
+
+// A click is ignored while a modal/dialog/detail view owns the screen — the pane
+// region isn't drawn, so a stray press must not move focus behind the overlay.
+func TestMouse_IgnoredWhileModal(t *testing.T) {
+	form := newNewTaskForm()
+	cases := []struct {
+		name  string
+		setup func(*Model)
+	}{
+		{"new-task form", func(m *Model) { m.creatingTask = &form }},
+		{"spawn confirm", func(m *Model) { m.confirming = &task.Task{ID: "T-001"} }},
+		{"filter active", func(m *Model) { m.filterActive = true }},
+		{"detail view", func(m *Model) { m.view = detailView }},
+		{"log-task popover", func(m *Model) { m.logTaskPopover = true }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr := newStubManager()
+			m := nativeModel(t, mgr)
+			tc.setup(&m)
+			hitAt(mgr, "T-003") // would hit a pane if the handler got that far
+
+			m = press(t, m, 120, 5)
+
+			if m.paneFocused {
+				t.Error("a click must not focus a pane while a modal owns the screen")
+			}
+			if mgr.focusedTask != "" || len(mgr.writes) != 0 {
+				t.Errorf("modal click must be a no-op: focused=%q writes=%d", mgr.focusedTask, len(mgr.writes))
+			}
+		})
+	}
+}
+
+// Plain motion and release are ignored (only presses route) so a moving pointer
+// never thrashes focus or floods the child.
+func TestMouse_MotionAndReleaseIgnored(t *testing.T) {
+	mgr := newStubManager()
+	mgr.focusedTask = "T-003"
+	m := nativeModel(t, mgr)
+	m.paneFocused = true
+	hitAt(mgr, "T-003")
+
+	for _, action := range []tea.MouseAction{tea.MouseActionMotion, tea.MouseActionRelease} {
+		out, _ := m.Update(tea.MouseMsg{Action: action, Button: tea.MouseButtonLeft, X: 120, Y: 5})
+		m = out.(Model)
+	}
+	if len(mgr.writes) != 0 {
+		t.Errorf("motion/release must not forward to the child, got %d writes", len(mgr.writes))
+	}
+}
+
+// Exception: FocusByTask returning ErrUnknownPane (pane closed between render and
+// click) is swallowed — focus stays on the list, no panic.
+func TestMouse_FocusByTaskErrSwallowed(t *testing.T) {
+	mgr := newStubManager()
+	mgr.focusErr = pane.ErrUnknownPane
+	m := nativeModel(t, mgr)
+	hitAt(mgr, "T-003")
+
+	m = press(t, m, 120, 5)
+
+	if m.paneFocused {
+		t.Error("a FocusByTask error must leave focus on the list")
+	}
+	if len(mgr.writes) != 0 {
+		t.Errorf("no forward on a focus error, got %d writes", len(mgr.writes))
+	}
+}
+
+// Exception: an unmappable event (EncodeMouse returns nil) on the focused pane
+// forwards nothing — no write, no panic.
+func TestMouse_UnmappableEventNotForwarded(t *testing.T) {
+	mgr := newStubManager()
+	mgr.focusedTask = "T-003"
+	m := nativeModel(t, mgr)
+	m.paneFocused = true
+	hitAt(mgr, "T-003")
+
+	// MouseButtonNone is unmappable — EncodeMouse returns nil.
+	out, _ := m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonNone, X: 120, Y: 5})
+	m = out.(Model)
+
+	if len(mgr.writes) != 0 {
+		t.Errorf("an unmappable event must not be forwarded, got %d writes", len(mgr.writes))
+	}
+}
+
+// Regression: tmux mode never handles mouse events (the program is built without
+// mouse support), so a MouseMsg is a no-op and never touches a (nil) manager.
+func TestMouse_TmuxModeNoOp(t *testing.T) {
+	m := New(config.Defaults()) // tmux engine — manager is nil
+	out, _ := m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: 10, Y: 10})
+	if _, ok := out.(Model); !ok {
+		t.Fatal("tmux MouseMsg should return the Model unchanged")
 	}
 }
