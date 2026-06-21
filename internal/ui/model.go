@@ -105,6 +105,7 @@ type Model struct {
 	tooNarrow         bool              // true when zoomed due to narrow terminal
 	formZoomed        bool              // true while pane is zoomed for the new-task form
 	compact           bool              // true while pane is shrunk to CompactListWidth
+	listCollapsed     bool              // true while the native list is manually collapsed to CompactListWidth via ctrl+b (T-056)
 	needsRespawn      bool              // true until the first task load triggers respawn
 	RespawnFunc       func([]task.Task) // called once after first load to respawn active panes
 
@@ -1337,6 +1338,16 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		uidebugf("collapse toggled")
 		return m, nil
 
+	case m.engineNative && key.Matches(msg, keys.CollapseList):
+		m.listCollapsed = !m.listCollapsed
+		if m.listCollapsed {
+			m.statusMsg = "list collapsed"
+		} else {
+			m.statusMsg = "list expanded"
+		}
+		uidebugf("list collapse toggled -> %v", m.listCollapsed)
+		return m, nil
+
 	case key.Matches(msg, keys.Up):
 		m.moveCursor(-1)
 
@@ -1884,7 +1895,7 @@ func (m Model) listViewRender() string {
 	case m.engineNative && m.paneFocused:
 		b.WriteString(helpStyle.Render("pane focus — keys go to the task  [ctrl+w] back to list  [ctrl+c] quit"))
 	case m.engineNative:
-		b.WriteString(helpStyle.Render("j/k nav  enter spawn  ctrl+w pane  L layout  [/] tabs  z collapse  t new  c done  d deact  b block  / filter  q quit"))
+		b.WriteString(helpStyle.Render("j/k nav  enter spawn  ctrl+w pane  L layout  [/] tabs  z collapse  ctrl+b list  t new  c done  d deact  b block  / filter  q quit"))
 	default:
 		b.WriteString(helpStyle.Render("j/k nav  enter spawn  t new  c complete  d deactivate  b block  tab detail  / filter  r refresh  q quit"))
 	}

@@ -497,6 +497,141 @@ func TestNativeTabAndCollapseKeys(t *testing.T) {
 	}
 }
 
+// ctrl+b toggles the manual list collapse (T-056) and sets the matching status
+// message; a second press restores it.
+func TestListCollapse_ToggleAndStatus(t *testing.T) {
+	mgr := newStubManager()
+	m := nativeModel(t, mgr)
+	if m.listCollapsed {
+		t.Fatal("precondition: list should start expanded")
+	}
+
+	out, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlB})
+	m = out.(Model)
+	if !m.listCollapsed {
+		t.Error("ctrl+b should collapse the list")
+	}
+	if m.statusMsg != "list collapsed" {
+		t.Errorf("statusMsg = %q, want \"list collapsed\"", m.statusMsg)
+	}
+
+	out, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlB})
+	m = out.(Model)
+	if m.listCollapsed {
+		t.Error("second ctrl+b should expand the list")
+	}
+	if m.statusMsg != "list expanded" {
+		t.Errorf("statusMsg = %q, want \"list expanded\"", m.statusMsg)
+	}
+}
+
+// Collapsing forces the list to its 20-col floor and hands the freed columns to
+// the pane region — rightRegion widens with the only edit in nativeListWidth.
+func TestListCollapse_WidensPaneRegion(t *testing.T) {
+	mgr := newStubManager()
+	m := nativeModel(t, mgr) // width 200 → responsive list parks at 60
+	expanded := m.rightRegion()
+
+	m.listCollapsed = true
+	collapsed := m.rightRegion()
+
+	if w := m.nativeListWidth(); w != CompactListWidth {
+		t.Errorf("collapsed nativeListWidth = %d, want %d", w, CompactListWidth)
+	}
+	if collapsed.W <= expanded.W {
+		t.Errorf("collapsed pane region width %d should exceed expanded %d",
+			collapsed.W, expanded.W)
+	}
+	if want := CompactListWidth + paneGutter; collapsed.X != want {
+		t.Errorf("collapsed region X = %d, want %d", collapsed.X, want)
+	}
+	if want := 200 - CompactListWidth - paneGutter; collapsed.W != want {
+		t.Errorf("collapsed region W = %d, want %d", collapsed.W, want)
+	}
+}
+
+// At width 20 the list renders its compact chrome: every line fits the floor and
+// the condensed top bar (the "sq" stub) is used.
+func TestListCollapse_RendersCompactChrome(t *testing.T) {
+	mgr := newStubManager()
+	m := nativeModel(t, mgr)
+	m.listCollapsed = true
+
+	out := m.listViewRender()
+	for i, line := range strings.Split(out, "\n") {
+		if w := lipgloss.Width(line); w > CompactListWidth {
+			t.Errorf("collapsed listViewRender line %d width %d exceeds %d: %q",
+				i, w, CompactListWidth, line)
+		}
+	}
+	if !strings.Contains(out, "sq") {
+		t.Errorf("collapsed list should use the compact top bar (sq stub): %q", out)
+	}
+}
+
+// nativeListCompact reports true once the list is collapsed on a wide terminal
+// (20 < tuiWidth 60) — with no edit of its own.
+func TestListCollapse_NativeListCompactTrueWhenCollapsedWide(t *testing.T) {
+	mgr := newStubManager()
+	m := nativeModel(t, mgr) // width 200 → full list fits, not compact
+	if m.nativeListCompact() {
+		t.Fatal("precondition: wide expanded list is not compact")
+	}
+	m.listCollapsed = true
+	if !m.nativeListCompact() {
+		t.Error("collapsed list on a wide terminal should report nativeListCompact() == true")
+	}
+}
+
+// While a pane is focused, ctrl+b is forwarded to the child (byte 0x02) and does
+// NOT toggle the list — it is a list-mode-only affordance, like its siblings.
+func TestListCollapse_PaneFocusedForwards(t *testing.T) {
+	mgr := newStubManager()
+	m := nativeModel(t, mgr)
+	m.paneFocused = true
+
+	out, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlB})
+	m = out.(Model)
+
+	if m.listCollapsed {
+		t.Error("ctrl+b while pane-focused must not toggle the list")
+	}
+	if len(mgr.writes) != 1 {
+		t.Fatalf("expected ctrl+b forwarded to the child, got %d writes", len(mgr.writes))
+	}
+	if got := mgr.writes[0]; len(got) != 1 || got[0] != 0x02 {
+		t.Errorf("expected forwarded ctrl+b byte 0x02, got %v", got)
+	}
+}
+
+// In tmux mode the handler arm (gated on engineNative) does not fire — ctrl+b
+// falls through and never toggles the list.
+func TestListCollapse_InertInTmuxMode(t *testing.T) {
+	m := compactModel(200, 3) // engine defaults to tmux
+	out, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlB})
+	m = out.(Model)
+	if m.listCollapsed {
+		t.Error("ctrl+b must not toggle listCollapsed in tmux mode")
+	}
+}
+
+// Driving a wide→narrow resize with the list collapsed exercises the
+// collapse-aware rightRegion through Manager.Resize: no panic, resizes recorded.
+func TestListCollapse_ResizeNoPanic(t *testing.T) {
+	mgr := newStubManager()
+	m := nativeModel(t, mgr)
+	m.listCollapsed = true
+
+	out, _ := m.Update(tea.WindowSizeMsg{Width: 200, Height: 50})
+	m = out.(Model)
+	out, _ = m.Update(tea.WindowSizeMsg{Width: 70, Height: 40})
+	m = out.(Model)
+
+	if mgr.resizes == 0 {
+		t.Error("expected the manager to receive at least one resize")
+	}
+}
+
 // The native status tick advances the badge-blink phase via manager.Tick.
 func TestNativeStatusTick_AdvancesBlink(t *testing.T) {
 	mgr := newStubManager()

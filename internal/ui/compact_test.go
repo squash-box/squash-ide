@@ -150,6 +150,66 @@ func TestNativeListCompact_FalseInTmuxMode(t *testing.T) {
 	}
 }
 
+// nativeListWidth honours the manual ctrl+b collapse latch (T-056): with
+// listCollapsed set it returns CompactListWidth on any terminal wide enough that
+// the responsive width would otherwise exceed the floor, overriding the
+// space-driven scaling. This is the single edit point — rightRegion,
+// listViewRender and nativeListCompact all derive from it.
+func TestNativeListWidth_Collapse(t *testing.T) {
+	mgr := newStubManager()
+	cases := []struct {
+		name      string
+		width     int
+		collapsed bool
+		want      int
+	}{
+		{"wide, expanded — responsive ceiling", 200, false, 60},
+		{"wide, collapsed — forced to floor", 200, true, CompactListWidth},
+		{"floor terminal (61), collapsed — idempotent at floor", 61, true, CompactListWidth},
+		{"floor terminal (61), expanded — already at floor", 61, false, CompactListWidth},
+		{"pre-first-WindowSizeMsg (width 0), collapsed — returns full, no spurious 20", 0, true, 60},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := nativeModel(t, mgr)
+			m.width = tc.width
+			m.listCollapsed = tc.collapsed
+			if got := m.nativeListWidth(); got != tc.want {
+				t.Errorf("nativeListWidth(width=%d, collapsed=%v) = %d, want %d",
+					tc.width, tc.collapsed, got, tc.want)
+			}
+		})
+	}
+}
+
+// Degenerate config: when the configured ceiling is <= CompactListWidth the
+// collapse latch must never *widen* the list — it stays exactly what the
+// responsive path produces (the full > CompactListWidth guard fails). Collapse
+// is inert here, not a widen to 20.
+func TestNativeListWidth_CollapseInertWhenConfigBelowFloor(t *testing.T) {
+	mgr := newStubManager()
+	m := nativeModel(t, mgr)
+	m.cfg.Tmux.TUIWidth = 15 // configured ceiling below CompactListWidth (20)
+	m.width = 200
+	expanded := m.nativeListWidth()
+	m.listCollapsed = true
+	collapsed := m.nativeListWidth()
+	if collapsed != expanded {
+		t.Errorf("collapse must be inert when tuiWidth (15) <= CompactListWidth: "+
+			"expanded=%d collapsed=%d", expanded, collapsed)
+	}
+}
+
+// nativeListWidth ignores the latch entirely in tmux mode — listCollapsed is a
+// native-only affordance and must never touch the tmux path.
+func TestNativeListWidth_CollapseInertInTmuxMode(t *testing.T) {
+	m := compactModel(200, 3) // engine defaults to tmux (engineNative == false)
+	m.listCollapsed = true
+	if got := m.nativeListWidth(); got != m.tuiWidth() {
+		t.Errorf("tmux nativeListWidth with listCollapsed = %d, want full %d", got, m.tuiWidth())
+	}
+}
+
 func TestIsCompact_DialogsDisable(t *testing.T) {
 	base := compactModel(200, 3)
 	if !base.isCompact() {

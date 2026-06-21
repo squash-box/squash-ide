@@ -79,6 +79,12 @@ func (m Model) nativeListWidth() int {
 	if !m.engineNative || m.width <= 0 {
 		return full
 	}
+	// A manual collapse (ctrl+b, T-056) forces the list to its compact floor so
+	// the panes get the freed columns, overriding the responsive width. Guarded so
+	// a degenerate tuiWidth <= CompactListWidth never *widens* the list.
+	if m.listCollapsed && full > CompactListWidth {
+		return CompactListWidth
+	}
 	w := m.width - paneGutter - nativeMinPaneWidth
 	if w > full {
 		w = full
