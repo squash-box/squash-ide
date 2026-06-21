@@ -35,6 +35,7 @@ var (
 	flagMinPaneWidth int
 	flagLayout       string
 	flagFFI          string // native focus-follows-input tri-state: "" unset, else true/false
+	flagPaneStats    string // native pane-stats tri-state: "" unset, else true/false
 )
 
 func main() {
@@ -50,6 +51,7 @@ func main() {
 	rootCmd.PersistentFlags().StringVar(&flagEngine, "engine", "", "window-management engine: tmux (default) or native (overrides config file and env)")
 	rootCmd.PersistentFlags().StringVar(&flagLayout, "layout", "", "native pane layout: columns, stack, tabs, or responsive (default) (overrides config file and env)")
 	rootCmd.PersistentFlags().StringVar(&flagFFI, "focus-follows-input", "", "native: auto-focus a pane that needs input — true or false (overrides config file and env)")
+	rootCmd.PersistentFlags().StringVar(&flagPaneStats, "pane-stats", "", "native: show per-pane CPU/mem in the header — true or false (overrides config file and env)")
 	rootCmd.PersistentFlags().StringVar(&flagTerminal, "terminal", "", "terminal emulator command (overrides config file and env)")
 	rootCmd.PersistentFlags().StringVar(&flagSpawnCmd, "spawn-cmd", "", "command to run inside spawned terminal (overrides config file and env)")
 	rootCmd.PersistentFlags().BoolVar(&flagNoTmux, "no-tmux", false, "disable tmux tiled-pane mode; spawn each task in its own OS terminal window")
@@ -141,22 +143,29 @@ to backlog, updates board/log, tears down the tmux pane).`,
 	}
 }
 
-// loadConfig resolves the config, applying CLI flags on top of env and file.
-func loadConfig() (config.Config, error) {
-	var ffi *bool
-	switch strings.ToLower(strings.TrimSpace(flagFFI)) {
+// parseTriState turns a CLI bool-ish string into a tri-state *bool: nil when
+// unset/unrecognised (config/env/default wins), else the parsed value. Shared by
+// the --focus-follows-input and --pane-stats native flags.
+func parseTriState(v string) *bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "true", "1", "yes", "on":
 		t := true
-		ffi = &t
+		return &t
 	case "false", "0", "no", "off":
 		f := false
-		ffi = &f
+		return &f
 	}
+	return nil
+}
+
+// loadConfig resolves the config, applying CLI flags on top of env and file.
+func loadConfig() (config.Config, error) {
 	return config.Load(config.Overrides{
 		Vault:             flagVault,
 		Engine:            flagEngine,
 		Layout:            flagLayout,
-		FocusFollowsInput: ffi,
+		FocusFollowsInput: parseTriState(flagFFI),
+		PaneStats:         parseTriState(flagPaneStats),
 		Terminal:          flagTerminal,
 		SpawnCmd:          flagSpawnCmd,
 		NoTmux:            flagNoTmux,

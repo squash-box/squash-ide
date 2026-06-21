@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/squashbox/squash-ide/internal/config"
 	"github.com/squashbox/squash-ide/internal/pane"
+	"github.com/squashbox/squash-ide/internal/procstat"
 	"github.com/squashbox/squash-ide/internal/status"
 	"github.com/squashbox/squash-ide/internal/task"
 )
@@ -33,6 +34,10 @@ type stubManager struct {
 	focusErr    error             // when set, FocusByTask returns it (pane died between tick and focus)
 	states      map[string]string // taskID -> last state set
 	canSpawn    bool
+
+	// T-055 resource-readout recording.
+	pids     map[string]int         // returned by PIDsByTask
+	statsSet map[string]statsRecord // taskID -> last stats set via SetStatsByTask
 
 	// T-051 mouse hit-test scripting: when set, TaskAtPoint delegates to it so a
 	// test can map a synthetic (x, y) to a chosen task id (or a miss). Nil => miss.
@@ -116,6 +121,23 @@ func (s *stubManager) TaskAtPoint(x, y int) (string, bool) {
 func (s *stubManager) SetStateByTask(taskID, state string) { s.states[taskID] = state }
 
 func (s *stubManager) CanSpawn() bool { return s.canSpawn }
+
+// statsRecord captures one SetStatsByTask call for assertions.
+type statsRecord struct {
+	cpuPct   float64
+	cpuValid bool
+	memBytes uint64
+	ok       bool
+}
+
+func (s *stubManager) PIDsByTask() map[string]int { return s.pids }
+
+func (s *stubManager) SetStatsByTask(taskID string, cpuPct float64, cpuValid bool, memBytes uint64, ok bool) {
+	if s.statsSet == nil {
+		s.statsSet = map[string]statsRecord{}
+	}
+	s.statsSet[taskID] = statsRecord{cpuPct: cpuPct, cpuValid: cpuValid, memBytes: memBytes, ok: ok}
+}
 
 func (s *stubManager) SetStrategy(st pane.Strategy) { s.strategy = st }
 func (s *stubManager) FocusNext()                   { s.focusNextCount++ }
@@ -567,6 +589,72 @@ func TestNativePaneOutputMsg_RearmsListener(t *testing.T) {
 	_, cmd := m.Update(paneOutputMsg{})
 	if cmd == nil {
 		t.Fatal("paneOutputMsg should return a command to re-arm the listener")
+	}
+}
+
+// --- T-055: per-pane CPU/mem header readout ---
+
+// Native Init batches the 15s resource tick when pane_stats is enabled, and a
+// resourceTickMsg fans usage out to SetStatsByTask and re-arms.
+func TestNativeResourceTick_FansOutAndRearms(t *testing.T) {
+	mgr := newStubManager()
+	m := nativeModel(t, mgr) // config.Defaults() -> PaneStats true
+
+	if m.statsCollector == nil {
+		t.Fatal("native model with pane_stats=true should build a stats collector")
+	}
+
+	msg := resourceTickMsg{usage: map[string]procstat.Usage{
+		"T-003": {CPUPercent: 3.2, CPUValid: true, RSSBytes: 145 << 20, OK: true},
+		"T-009": {OK: false},
+	}}
+	out, cmd := m.Update(msg)
+	_ = out.(Model)
+
+	rec, ok := mgr.statsSet["T-003"]
+	if !ok || !rec.ok || !rec.cpuValid || rec.cpuPct != 3.2 || rec.memBytes != 145<<20 {
+		t.Errorf("SetStatsByTask(T-003) = %+v, want cpu 3.2 valid mem 145M ok", rec)
+	}
+	failed := mgr.statsSet["T-009"]
+	if failed.ok {
+		t.Errorf("a failed sample should set ok=false for T-009, got %+v", failed)
+	}
+	if cmd == nil {
+		t.Error("resourceTickMsg should re-arm the resource tick")
+	}
+}
+
+// With pane_stats disabled, no collector is built, tickResources returns nil,
+// and a resourceTickMsg (should one arrive) drives no stats and no re-arm.
+func TestNativeResourceTick_DisabledNoCollector(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Engine = config.EngineNative
+	cfg.Vault = "/fake/vault"
+	cfg.PaneStats = false
+	m := New(cfg)
+	mgr := newStubManager()
+	m.manager = mgr
+	m.allTasks = testTasks()
+	m.width = 200
+	m.height = 50
+	m.buildItems()
+
+	if m.statsCollector != nil {
+		t.Fatal("pane_stats=false must not build a stats collector")
+	}
+	if m.tickResources() != nil {
+		t.Error("pane_stats=false: tickResources should return nil (never armed)")
+	}
+}
+
+// tmux mode never builds a stats collector (native-only feature).
+func TestTmuxModeNoStatsCollector(t *testing.T) {
+	m := New(config.Defaults()) // tmux engine
+	if m.statsCollector != nil {
+		t.Error("tmux engine must not build a stats collector")
+	}
+	if m.tickResources() != nil {
+		t.Error("tmux engine tickResources should be nil")
 	}
 }
 

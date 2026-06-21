@@ -34,6 +34,14 @@ layout: responsive
 # and only paint the input badge.
 focus_follows_input: true
 
+# Native-engine per-pane CPU/memory readout (T-055). Ignored under engine: tmux.
+# Env: SQUASH_PANE_STATS. Flag: --pane-stats.
+# When true, each native pane header shows a live CPU%/memory figure floated to
+# the right, refreshed every 15s and aggregated over the PTY process group
+# (claude + its tool subprocesses). Currently Linux-only (read from /proc); off
+# Linux the readout is a silent no-op. Set false to disable it and the 15s tick.
+pane_stats: true
+
 terminal:
   # Terminal emulator command used when --no-tmux is active. Empty lets
   # squash-ide auto-detect (ptyxis -> gnome-terminal -> x-terminal-emulator).

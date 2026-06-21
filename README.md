@@ -306,6 +306,23 @@ the next *genuinely new* prompt (after the agent makes progress) surfaces again.
 A modal/form/filter/detail view open in the list likewise suppresses surfacing
 so a background pane never yanks focus mid-interaction.
 
+**Pane resource stats.** With `pane_stats: true` (the default,
+`--pane-stats` flag / `SQUASH_PANE_STATS` env), each native pane header shows a
+live **CPU% + memory** readout floated hard against the right edge, opposite the
+status badge on the left — e.g. `● WORKING  T-099  fix…            3.2%  145M`.
+It refreshes every **15 seconds** (independent of the 1s badge tick) and reflects
+the **whole PTY process group** — the spawned `claude` plus every tool
+subprocess it forks (node, ripgrep, git, go, …) — since `claude` offloads nearly
+all real work to descendants, so the direct child alone would read as
+misleadingly idle. CPU shows `—` until there are two samples to diff. On a narrow
+pane the stats segment is dropped before the task id/title (the badge is never
+dropped) so the header never overflows. An exited pane freezes its last reading.
+
+The figure is currently **Linux-only** (read from `/proc`); off Linux the
+readout is a silent no-op (the header simply shows no stats). Set
+`pane_stats: false` (or `SQUASH_PANE_STATS=0`, or `--pane-stats false`) to turn
+the readout — and the 15s sampling tick — off entirely.
+
 **Task-creation popover.** Pressing `t` and submitting the new-task form hands
 off to the `/log-task` Claude skill. Under `engine: native` that interactive
 session runs in a **centered popover** composited *over* the tiled spawn region —
@@ -394,6 +411,7 @@ vault: ~/GIT/agentic/tasks/personal
 engine: tmux        # tmux (default) | native (experimental, see Engine above)
 layout: responsive  # native only: columns | stack | tabs | responsive (default)
 focus_follows_input: true  # native only: auto-surface a pane needing input
+pane_stats: true    # native only: per-pane CPU/mem in the header, 15s (Linux-only)
 terminal:
   command: ""      # empty = auto-detect ptyxis → gnome-terminal → x-terminal-emulator
   args: ["--working-directory={cwd}", "--", "bash", "-c", "{exec}"]
@@ -415,6 +433,7 @@ Environment variables (override file):
 | `SQUASH_ENGINE`    | window-management engine (`tmux`/`native`) |
 | `SQUASH_LAYOUT`    | native pane layout (`columns`/`stack`/`tabs`/`responsive`) |
 | `SQUASH_FOCUS_FOLLOWS_INPUT` | native: auto-focus a pane needing input (`true`/`false`) |
+| `SQUASH_PANE_STATS` | native: per-pane CPU/mem header readout (`true`/`false`, Linux-only) |
 | `SQUASH_TERMINAL`  | terminal emulator command              |
 | `SQUASH_SPAWN_CMD` | command to run inside spawned terminal |
 
@@ -426,6 +445,7 @@ CLI flags (override env):
 | `--engine`          | window-management engine (`tmux`/`native`) |
 | `--layout`          | native pane layout (`columns`/`stack`/`tabs`/`responsive`) |
 | `--focus-follows-input` | native: auto-focus a pane needing input (`true`/`false`) |
+| `--pane-stats`      | native: per-pane CPU/mem header readout (`true`/`false`, Linux-only) |
 | `--terminal`        | terminal emulator command           |
 | `--spawn-cmd`       | command to run inside spawned terminal |
 | `--no-tmux`         | disable tmux tiled-pane mode        |

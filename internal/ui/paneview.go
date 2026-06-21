@@ -46,6 +46,14 @@ type paneManager interface {
 	// CanSpawn reports whether the region admits one more pane (spawn pre-flight).
 	CanSpawn() bool
 
+	// T-055 resource-readout surface — the header CPU/mem monitor.
+
+	// PIDsByTask maps each live task-bound pane's task id to its child PID, for
+	// the resource sampler (skips dead / pid-less panes; excludes the modal).
+	PIDsByTask() map[string]int
+	// SetStatsByTask drives the pane's right-floated CPU/mem header readout.
+	SetStatsByTask(taskID string, cpuPct float64, cpuValid bool, memBytes uint64, ok bool)
+
 	// T-040 responsive-layout surface — runtime layout controls and the badge
 	// animation tick.
 

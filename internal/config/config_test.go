@@ -598,6 +598,70 @@ func TestFormat_IncludesLayout(t *testing.T) {
 	}
 }
 
+func TestPaneStatsDefault(t *testing.T) {
+	d := Defaults()
+	if !d.PaneStats {
+		t.Error("default pane_stats should be true")
+	}
+	if d.Sources["pane_stats"] != SourceDefault {
+		t.Errorf("default pane_stats source = %q, want default", d.Sources["pane_stats"])
+	}
+}
+
+func TestLoad_PaneStatsFromFile(t *testing.T) {
+	clearSquashEnv(t)
+	path := writeConfig(t, "pane_stats: false\n")
+	cfg, err := Load(Overrides{ConfigPath: path})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.PaneStats {
+		t.Error("pane_stats = true, want false (from file)")
+	}
+	if cfg.Sources["pane_stats"] != SourceFile {
+		t.Errorf("pane_stats source = %q, want file", cfg.Sources["pane_stats"])
+	}
+}
+
+func TestLoad_PaneStatsEnvOverridesFile(t *testing.T) {
+	clearSquashEnv(t)
+	t.Setenv("SQUASH_PANE_STATS", "0")
+	path := writeConfig(t, "pane_stats: true\n")
+	cfg, err := Load(Overrides{ConfigPath: path})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.PaneStats {
+		t.Error("pane_stats = true, want false (env over file)")
+	}
+	if cfg.Sources["pane_stats"] != SourceEnv {
+		t.Errorf("pane_stats source = %q, want env", cfg.Sources["pane_stats"])
+	}
+}
+
+func TestLoad_PaneStatsFlagOverridesEnv(t *testing.T) {
+	clearSquashEnv(t)
+	t.Setenv("SQUASH_PANE_STATS", "1")
+	ps := false
+	cfg, err := Load(Overrides{PaneStats: &ps})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.PaneStats {
+		t.Error("pane_stats = true, want false (flag over env)")
+	}
+	if cfg.Sources["pane_stats"] != SourceFlag {
+		t.Errorf("pane_stats source = %q, want flag", cfg.Sources["pane_stats"])
+	}
+}
+
+func TestFormat_IncludesPaneStats(t *testing.T) {
+	cfg := Defaults()
+	if !strings.Contains(cfg.Format(), "pane_stats: true (from default)") {
+		t.Errorf("format should show pane_stats line, got: %s", cfg.Format())
+	}
+}
+
 func TestFormat_IncludesEngine(t *testing.T) {
 	cfg := Defaults()
 	cfg.Engine = EngineNative
