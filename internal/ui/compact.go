@@ -54,6 +54,27 @@ func (m Model) isCompact() bool {
 	return activeTaskCount(m.allTasks) >= CompactMinActiveSpawns
 }
 
+// nativeListCompact reports whether the native engine should collapse the task
+// list to CompactListWidth. Unlike isCompact (a tmux-pane behaviour, always
+// false under native), this is space-driven: the list shrinks when the full
+// list plus a usable pane region won't fit the terminal, freeing
+// TUIWidth-CompactListWidth columns for the panes before they reflow (T-040).
+//
+// It is the single source of truth for "the native list renders narrow" —
+// rightRegion's pane-region calc, nativeView's too-narrow gate, and
+// listViewRender's width branch all consume it, so the rendered list and the
+// reserved region can never disagree.
+func (m Model) nativeListCompact() bool {
+	if !m.engineNative {
+		return false
+	}
+	full := m.tuiWidth()
+	if full <= CompactListWidth {
+		return false
+	}
+	return m.width > 0 && m.width < full+paneGutter+nativeMinPaneWidth
+}
+
 // refreshWindowWidth queries tmux for the outer window column count and
 // caches it on the model. Best-effort: errors and zero readings leave the
 // previous value in place so a transient tmux failure doesn't flip the

@@ -1444,9 +1444,11 @@ func (m Model) View() string {
 
 func (m Model) listViewRender() string {
 	// The task list is normally rendered at cfg.Tmux.TUIWidth (default 60).
-	// In compact mode — narrow terminal + 2+ active spawns — it collapses
-	// to CompactListWidth to free horizontal space for the tiled panes.
-	compact := m.isCompact()
+	// In compact mode it collapses to CompactListWidth to free horizontal
+	// space for the tiled panes. Two independent triggers feed this: the tmux
+	// path (isCompact — narrow terminal + 2+ active spawns) and the native path
+	// (nativeListCompact — the full list would starve the pane region, T-052).
+	compact := m.isCompact() || m.nativeListCompact()
 	width := m.width
 	maxWidth := m.cfg.Tmux.TUIWidth
 	if maxWidth <= 0 {

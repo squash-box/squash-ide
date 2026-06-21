@@ -269,10 +269,14 @@ chosen by the `layout` config key (`--layout` flag / `SQUASH_LAYOUT` env):
 | `tabs`                 | One pane fills the region; the rest live in a tab strip you cycle with `[` / `]`. |
 | `responsive` (default) | Auto-reflows **columns → stack → tabs** as the region shrinks, so a spawn never hard-rejects on a narrow terminal. |
 
-This makes the tmux-era [compact mode](#compact-mode--narrow-terminals)
-unnecessary under `engine: native` — the responsive strategy claws back space
-by reflowing rather than by shrinking the task list, and a narrow terminal tabs
-instead of erroring.
+On a narrow terminal the native engine reclaims space in two stages: first it
+collapses the task list to its compact (20-col) width — space-drivenly, the
+moment a full-width list would starve the pane region below its usable floor —
+and hands the recovered columns to the panes; then the responsive strategy
+reflows **columns → stack → tabs** within that region. So a narrow terminal
+shrinks the list and tabs the panes instead of erroring. (This is the native
+analogue of the tmux-era [compact mode](#compact-mode--narrow-terminals),
+triggered by available space rather than the tmux active-spawn heuristic.)
 
 Keyboard controls (list mode, native engine only):
 

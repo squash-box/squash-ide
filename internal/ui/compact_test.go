@@ -95,6 +95,60 @@ func TestIsCompact_WindowWidthArm(t *testing.T) {
 	}
 }
 
+// TestNativeListCompact_TruthTable covers the space-driven native predicate
+// (T-052). The trigger is m.width < tuiWidth()+gutter+nativeMinPaneWidth (with
+// the default 60-col list: < 101), guarded by engineNative, a positive width,
+// and a full list wider than the compact width. Independent of the tmux
+// active-spawn/CompactTriggerWidth heuristic.
+func TestNativeListCompact_TruthTable(t *testing.T) {
+	mgr := newStubManager()
+	cases := []struct {
+		name  string
+		width int
+		want  bool
+	}{
+		{"wide terminal — full list fits", 200, false},
+		{"compaction band", 90, true},
+		{"boundary full+gutter+min (101) — strict <, not compact", 101, false},
+		{"boundary 100 — compact", 100, true},
+		{"compact floor (61) — compact, not too narrow", 61, true},
+		{"below compact floor (60)", 60, true},
+		{"width zero — startup, no spurious compaction", 0, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := nativeModel(t, mgr)
+			m.width = tc.width
+			if got := m.nativeListCompact(); got != tc.want {
+				t.Errorf("nativeListCompact(width=%d) = %v, want %v", tc.width, got, tc.want)
+			}
+		})
+	}
+}
+
+// Degenerate config: when the configured list width is <= CompactListWidth the
+// predicate never fires — it must never "compact" to a width wider than full.
+func TestNativeListCompact_DegenerateConfigWidth(t *testing.T) {
+	mgr := newStubManager()
+	m := nativeModel(t, mgr)
+	m.cfg.Tmux.TUIWidth = CompactListWidth // full list already at the compact width
+	m.width = 30                           // narrow — would compact under a normal config
+	if m.nativeListCompact() {
+		t.Error("nativeListCompact must be false when full list width <= CompactListWidth")
+	}
+}
+
+// The native predicate must be false in tmux mode for all widths — it is the
+// native analogue of isCompact and must not touch the tmux path.
+func TestNativeListCompact_FalseInTmuxMode(t *testing.T) {
+	for _, w := range []int{0, 60, 90, 100, 200} {
+		m := compactModel(w, 3) // engine defaults to tmux (engineNative == false)
+		if m.nativeListCompact() {
+			t.Errorf("nativeListCompact must be false in tmux mode (width=%d)", w)
+		}
+	}
+}
+
 func TestIsCompact_DialogsDisable(t *testing.T) {
 	base := compactModel(200, 3)
 	if !base.isCompact() {
