@@ -14,6 +14,7 @@ import (
 	"github.com/squashbox/squash-ide/internal/config"
 	"github.com/squashbox/squash-ide/internal/dispatch"
 	"github.com/squashbox/squash-ide/internal/pane"
+	"github.com/squashbox/squash-ide/internal/procstat"
 	"github.com/squashbox/squash-ide/internal/spawner"
 	"github.com/squashbox/squash-ide/internal/status"
 	"github.com/squashbox/squash-ide/internal/task"
@@ -115,6 +116,14 @@ type Model struct {
 	paneFocused  bool
 	layoutName   string // active native layout name (T-040); cycled by the 'L' key
 
+	// statsCollector samples per-pane CPU/mem for the header readout (T-055). It
+	// is non-nil only when the native engine is on AND cfg.PaneStats is true; a
+	// nil collector means the 15s tickResources is never armed, so the feature is
+	// a clean no-op when disabled or under tmux. It is a pointer so its retained
+	// per-pid baseline survives Model value-copies, and it is touched only from
+	// the single outstanding tickResources goroutine (no extra lock needed).
+	statsCollector *procstat.Collector
+
 	// logTaskPopover is true while the native-engine /log-task session runs in a
 	// centered popover pane composited over the spawn region (T-050). It is the
 	// modal-state marker: while set, every keystroke routes to the popover's
@@ -162,6 +171,12 @@ func New(cfg config.Config) Model {
 		m.manager = pane.NewManager(
 			pane.WithStrategy(pane.StrategyForName(cfg.Layout)),
 		)
+		// The header CPU/mem readout (T-055) is opt-out via pane_stats. When on,
+		// build a collector over the platform sampler (a /proc reader on Linux, a
+		// no-op stub elsewhere — the header simply shows nothing off Linux).
+		if cfg.PaneStats {
+			m.statsCollector = procstat.NewCollector(procstat.NewSampler())
+		}
 	}
 	return m
 }
@@ -190,6 +205,11 @@ func (m Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{m.loadTasks, m.tickStatus()}
 	if m.engineNative {
 		cmds = append(cmds, m.waitForPaneOutput())
+		// Arm the 15s resource tick only when pane stats are enabled (collector
+		// non-nil); otherwise the readout is a clean no-op (T-055).
+		if rc := m.tickResources(); rc != nil {
+			cmds = append(cmds, rc)
+		}
 	}
 	return tea.Batch(cmds...)
 }
@@ -238,6 +258,13 @@ type statusTickMsg struct {
 // re-arms waitForPaneOutput for the next signal.
 type paneOutputMsg struct{}
 
+// resourceTickMsg carries one round of sampled per-pane CPU/mem usage (T-055),
+// keyed by task id. Emitted by the 15s tickResources, independent of the 1s
+// status tick.
+type resourceTickMsg struct {
+	usage map[string]procstat.Usage
+}
+
 type logTaskDoneMsg struct{}
 
 type logTaskErrMsg struct {
@@ -264,6 +291,30 @@ func (m Model) tickStatus() tea.Cmd {
 			}
 		}
 		return msg
+	})
+}
+
+// paneStatsInterval is the fixed cadence of the header CPU/mem refresh (T-055).
+// It is a package const, not a config key — the requirement is a fixed 15s,
+// deliberately decoupled from the 1s badge tick so the resource readout doesn't
+// flood /proc.
+const paneStatsInterval = 15 * time.Second
+
+// tickResources samples every live pane's process group every 15s and returns a
+// resourceTickMsg the Update handler fans out to SetStatsByTask (T-055). It
+// snapshots PIDsByTask, then SampleAll outside any lock (the collector is
+// touched only here, and only one tick is ever outstanding — re-armed from the
+// handler — so no new synchronisation is needed). It returns nil when the
+// feature is off (no collector), so a stray call is a harmless no-op.
+func (m Model) tickResources() tea.Cmd {
+	if !m.engineNative || m.statsCollector == nil {
+		return nil
+	}
+	manager := m.manager
+	collector := m.statsCollector
+	return tea.Tick(paneStatsInterval, func(time.Time) tea.Msg {
+		usage := collector.SampleAll(manager.PIDsByTask())
+		return resourceTickMsg{usage: usage}
 	})
 }
 
@@ -704,6 +755,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, m.tickStatus()
+
+	case resourceTickMsg:
+		// Fan the sampled usage out to the per-pane header readout (T-055), then
+		// re-arm the 15s tick. Returning the model re-Views, so no requestRepaint
+		// is needed (that path is for the async pane-output channel). A pid that
+		// couldn't be sampled (OK=false) is logged at debug level and its pane is
+		// told ok=false so the header drops the stats rather than showing stale
+		// numbers; an exited pane freezes its last reading inside SetStats.
+		for taskID, u := range msg.usage {
+			if !u.OK {
+				uidebugf("pane stats: sample failed for %s", taskID)
+			}
+			m.manager.SetStatsByTask(taskID, u.CPUPercent, u.CPUValid, u.RSSBytes, u.OK)
+		}
+		return m, m.tickResources()
 
 	case tea.KeyMsg:
 		newModel, cmd := m.handleKey(msg)
