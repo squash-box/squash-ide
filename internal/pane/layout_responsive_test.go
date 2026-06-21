@@ -46,15 +46,45 @@ func TestResponsive_PicksByRegion(t *testing.T) {
 	}
 }
 
-// TestResponsive_ColumnsBoundary: columns need W >= n*MinWidth + n*Gutter. For
-// n=3, MinWidth 20, Gutter 1 that is 63. 63 → columns, 62 → stack (region tall).
+// TestResponsive_ColumnsBoundary: the auto-mode keeps columns only while each
+// pane clears responsiveColumnMinWidth (100), not the hard MinWidth (20). For
+// n=3, Gutter 1 that is 3*100 + 3*1 = 303. 303 → columns, 302 → stack (tall).
 func TestResponsive_ColumnsBoundary(t *testing.T) {
 	tall := 40
-	if s, _ := (Responsive{}).resolve(Rect{W: 63, H: tall}, 3, rc); strategyName(s) != "columns" {
-		t.Errorf("W=63 picked %s, want columns (exact fit)", strategyName(s))
+	if s, _ := (Responsive{}).resolve(Rect{W: 303, H: tall}, 3, rc); strategyName(s) != "columns" {
+		t.Errorf("W=303 picked %s, want columns (exact fit at 100/pane)", strategyName(s))
 	}
-	if s, _ := (Responsive{}).resolve(Rect{W: 62, H: tall}, 3, rc); strategyName(s) != "stack" {
-		t.Errorf("W=62 picked %s, want stack (one col short)", strategyName(s))
+	if s, _ := (Responsive{}).resolve(Rect{W: 302, H: tall}, 3, rc); strategyName(s) != "stack" {
+		t.Errorf("W=302 picked %s, want stack (one col short of 100/pane)", strategyName(s))
+	}
+}
+
+// TestResponsive_ColumnsBoundary_TwoPanes: the headline case — two panes go
+// side-by-side only at 2*100 + 2*1 = 202 (avail = W - n*gutter must clear
+// n*100), and stack below it even though they would comfortably fit columns at
+// the old MinWidth(20) threshold.
+func TestResponsive_ColumnsBoundary_TwoPanes(t *testing.T) {
+	tall := 40
+	if s, _ := (Responsive{}).resolve(Rect{W: 202, H: tall}, 2, rc); strategyName(s) != "columns" {
+		t.Errorf("W=202 picked %s, want columns (exact fit at 100/pane)", strategyName(s))
+	}
+	if s, _ := (Responsive{}).resolve(Rect{W: 201, H: tall}, 2, rc); strategyName(s) != "stack" {
+		t.Errorf("W=201 picked %s, want stack (one col short of 100/pane)", strategyName(s))
+	}
+	// A width that fits 2 columns at MinWidth(20) but not at 100/pane now stacks.
+	if s, _ := (Responsive{}).resolve(Rect{W: 80, H: tall}, 2, rc); strategyName(s) != "stack" {
+		t.Errorf("W=80 picked %s, want stack (fits old min, not 100/pane)", strategyName(s))
+	}
+}
+
+// TestResponsive_SinglePaneKeepsColumns: the per-pane preference is skipped for
+// n==1 — a lone pane fills the region, so a narrow region must not reflow it to
+// the rows axis. (FlexColumns and StackRows render identically for one pane, but
+// the axis the Manager composes along should stay columns.)
+func TestResponsive_SinglePaneKeepsColumns(t *testing.T) {
+	// 50 cols is far below responsiveColumnMinWidth but well above MinWidth(20).
+	if s, _ := (Responsive{}).resolve(Rect{W: 50, H: 40}, 1, rc); strategyName(s) != "columns" {
+		t.Errorf("single pane at W=50 picked %s, want columns", strategyName(s))
 	}
 }
 
