@@ -87,11 +87,22 @@ var (
 	projectDimStyle = lipgloss.NewStyle().
 			Foreground(colorMuted)
 
+	// Lifecycle progress lights (T-053): done (green), active (amber), pending
+	// (grey), failed (red, ci only). On/off reuse the pre-staged scaffolding.
 	progressOnStyle = lipgloss.NewStyle().
 			Foreground(colorWorking)
 
 	progressOffStyle = lipgloss.NewStyle().
 				Foreground(colorDivider)
+
+	progressActiveStyle = lipgloss.NewStyle().
+				Foreground(colorIdle) // amber (214)
+
+	progressFailStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("196")) // red
+
+	progressLabelStyle = lipgloss.NewStyle().
+				Foreground(colorMuted)
 
 	// Left accent bar for the selected card.
 	cursorBarStyle = lipgloss.NewStyle().

@@ -391,6 +391,50 @@ holds `notify-send` open with `--wait` and `--action`, so Claude Code's
 "hooks complete quickly" contract is preserved. Click-to-focus is a
 best-effort no-op under `--no-tmux` (no session to switch to).
 
+### Task progress lights
+
+Active tasks carry a second, orthogonal dimension to the activity badge
+(`● WORKING` / `○ IDLE` / `⚠ INPUT REQUIRED` / `⧖ TESTING`): a row of **stage
+lights** that answer "how far through the task is it?" rather than "what is it
+doing this second?". The six lifecycle stages are:
+
+| Stage            | Source            | Meaning                              |
+|------------------|-------------------|--------------------------------------|
+| `planning`       | Claude (MCP)      | drafting the working/implementation plan |
+| `implementation` | Claude (MCP)      | writing code                         |
+| `testing`        | Claude (MCP)      | running the test suite               |
+| `acceptance`     | Claude (MCP)      | acceptance criteria verified         |
+| `pr`             | squash-ide (`gh`) | a PR has been raised for the branch  |
+| `ci`             | squash-ide (`gh`) | CI checks on that PR                 |
+
+Each light is **done** (green `●`), **active** (amber `◐`), **pending**
+(grey `○`), or — for `ci` only — **failed** (red `✗`). The stage ordering is
+monotonic: reporting one stage implies every earlier one is done. An unselected
+card shows a compact one-line strip (`● ● ◐ ○ ○ ○`); the **selected** card and
+the detail view expand it to a labelled row per stage.
+
+Stages 1–4 are reported by the spawned Claude session through the
+`squash_status` MCP tool's optional `stage` argument (enum: `planning`,
+`implementation`, `testing`, `acceptance` — `pr`/`ci` are never accepted from
+the model). `state` and `stage` are independent; report both as they change:
+
+```jsonc
+// MCP tools/call arguments
+{ "state": "working", "message": "writing the renderer", "stage": "implementation" }
+```
+
+The `pr` and `ci` lights are detected automatically by polling `gh` (PR
+existence + the status-check rollup) on a throttled ~20 s cadence — never on the
+1 s status loop. A missing PR, an absent `gh` binary, or a non-GitHub remote
+degrades gracefully to a grey light (never an error). When no PR exists yet both
+`pr` and `ci` stay grey, which also reads correctly for tasks that will never
+raise a PR.
+
+> The spawned-pane border still shows only the activity badge; the stage lights
+> are a task-list/detail concept. Teaching the `/implement` skill to emit
+> `stage` reports at each phase boundary is a tracked follow-up — until then the
+> Claude-reported lights stay pending while `pr`/`ci` work from `gh`.
+
 ### Config
 
 ```bash
@@ -423,6 +467,9 @@ tmux:
   session_name: squash-ide
   tui_width: 60
   min_pane_width: 80
+progress:
+  show: true       # show the per-task lifecycle stage lights (see above)
+  poll_ci: true    # poll gh for the pr/ci lights; false keeps squash-ide off the network
 ```
 
 Environment variables (override file):
@@ -434,6 +481,8 @@ Environment variables (override file):
 | `SQUASH_LAYOUT`    | native pane layout (`columns`/`stack`/`tabs`/`responsive`) |
 | `SQUASH_FOCUS_FOLLOWS_INPUT` | native: auto-focus a pane needing input (`true`/`false`) |
 | `SQUASH_PANE_STATS` | native: per-pane CPU/mem header readout (`true`/`false`, Linux-only) |
+| `SQUASH_PROGRESS_SHOW` | show the lifecycle stage lights (`true`/`false`) |
+| `SQUASH_PROGRESS_POLL_CI` | poll `gh` for the pr/ci lights (`true`/`false`) |
 | `SQUASH_TERMINAL`  | terminal emulator command              |
 | `SQUASH_SPAWN_CMD` | command to run inside spawned terminal |
 

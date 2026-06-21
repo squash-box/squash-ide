@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -128,6 +129,117 @@ func TestHandleToolCall_SquashStatus_WritesFile(t *testing.T) {
 	}
 	// Sanity: filename matches.
 	_ = filepath.Join(status.Dir, taskID+".json")
+}
+
+func TestHandleToolCall_WithStage_WritesBothFiles(t *testing.T) {
+	taskID := "T-test-mcp-stage-" + t.Name()
+	t.Cleanup(func() {
+		_ = status.Remove(taskID)
+		_ = status.RemoveStage(taskID)
+	})
+
+	params := toolCallParams{
+		Name:      "squash_status",
+		Arguments: json.RawMessage(`{"state":"working","message":"hi","stage":"implementation"}`),
+	}
+	paramsJSON, _ := json.Marshal(params)
+	req := &jsonRPCRequest{ID: json.RawMessage(`9`), Method: "tools/call", Params: paramsJSON}
+
+	resp := handleRequest(taskID, req)
+	if resp.Error != nil {
+		t.Fatalf("tool call err: %+v", resp.Error)
+	}
+	result := resp.Result.(mcpToolResult)
+	if result.IsError {
+		t.Fatalf("unexpected isError: %+v", result)
+	}
+
+	// Activity file written (state).
+	if _, err := os.Stat(filepath.Join(status.Dir, taskID+".json")); err != nil {
+		t.Errorf("activity file missing: %v", err)
+	}
+	// Stage merged through ReadAll.
+	all, err := status.ReadAll()
+	if err != nil {
+		t.Fatalf("readAll: %v", err)
+	}
+	if all[taskID].Stage != "implementation" {
+		t.Errorf("merged stage = %q, want implementation", all[taskID].Stage)
+	}
+}
+
+func TestHandleToolCall_BogusStage_IsErrorNoStageFile(t *testing.T) {
+	taskID := "T-test-mcp-bogus-" + t.Name()
+	t.Cleanup(func() {
+		_ = status.Remove(taskID)
+		_ = status.RemoveStage(taskID)
+	})
+
+	params := toolCallParams{
+		Name:      "squash_status",
+		Arguments: json.RawMessage(`{"state":"working","message":"hi","stage":"deploying"}`),
+	}
+	paramsJSON, _ := json.Marshal(params)
+	req := &jsonRPCRequest{ID: json.RawMessage(`10`), Method: "tools/call", Params: paramsJSON}
+
+	resp := handleRequest(taskID, req)
+	if resp.Error != nil {
+		t.Fatalf("should be a tool-result error, not a JSON-RPC error: %+v", resp.Error)
+	}
+	result := resp.Result.(mcpToolResult)
+	if !result.IsError {
+		t.Error("expected IsError for unknown stage")
+	}
+	// Activity write still succeeded.
+	if _, err := os.Stat(filepath.Join(status.Dir, taskID+".json")); err != nil {
+		t.Errorf("activity file should still be written: %v", err)
+	}
+	// No stage was persisted.
+	all, _ := status.ReadAll()
+	if all[taskID].Stage != "" {
+		t.Errorf("bogus stage must not be written, got %q", all[taskID].Stage)
+	}
+}
+
+func TestHandleToolCall_NoStage_NoStageFile(t *testing.T) {
+	taskID := "T-test-mcp-nostage-" + t.Name()
+	t.Cleanup(func() {
+		_ = status.Remove(taskID)
+		_ = status.RemoveStage(taskID)
+	})
+
+	params := toolCallParams{
+		Name:      "squash_status",
+		Arguments: json.RawMessage(`{"state":"working","message":"hi"}`),
+	}
+	paramsJSON, _ := json.Marshal(params)
+	req := &jsonRPCRequest{ID: json.RawMessage(`11`), Method: "tools/call", Params: paramsJSON}
+
+	resp := handleRequest(taskID, req)
+	if resp.Error != nil || resp.Result.(mcpToolResult).IsError {
+		t.Fatalf("unexpected error: %+v", resp)
+	}
+	all, _ := status.ReadAll()
+	if all[taskID].Stage != "" {
+		t.Errorf("no stage should be written when omitted, got %q", all[taskID].Stage)
+	}
+}
+
+func TestHandleRequest_ToolsList_HasStageProperty(t *testing.T) {
+	req := &jsonRPCRequest{ID: json.RawMessage(`12`), Method: "tools/list"}
+	resp := handleRequest("T-001", req)
+	tools := resp.Result.(map[string]any)["tools"].([]map[string]any)
+	schema := tools[0]["inputSchema"].(map[string]any)
+	props := schema["properties"].(map[string]any)
+	if _, ok := props["stage"]; !ok {
+		t.Fatal("tools/list schema missing the stage property")
+	}
+	// stage must NOT be required (backward-compat with no-stage callers).
+	for _, r := range schema["required"].([]string) {
+		if r == "stage" {
+			t.Error("stage must be optional, not required")
+		}
+	}
 }
 
 func TestHandleToolCall_UnknownTool(t *testing.T) {

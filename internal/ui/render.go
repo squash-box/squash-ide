@@ -5,9 +5,132 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/squashbox/squash-ide/internal/ghx"
 	"github.com/squashbox/squash-ide/internal/status"
 	"github.com/squashbox/squash-ide/internal/task"
 )
+
+// ghProgress is the live, gh-detected PR/CI state for a task's branch (T-053).
+// It is computed by the throttled tickProgress poll (model.go), never persisted,
+// and overlaid onto the pr/ci stage lights. The zero value (no PR, no checks)
+// renders both grey — the "if applicable" / not-raised-yet path.
+type ghProgress struct {
+	prRaised bool
+	checks   ghx.ChecksState
+}
+
+// stageLight is the rendered state of one lifecycle traffic light.
+type stageLight int
+
+const (
+	lightPending stageLight = iota // ○ grey
+	lightActive                    // ◐ amber
+	lightDone                      // ● green
+	lightFailed                    // ✗ red (ci only)
+)
+
+func (l stageLight) glyph() string {
+	switch l {
+	case lightDone:
+		return "●"
+	case lightActive:
+		return "◐"
+	case lightFailed:
+		return "✗"
+	default:
+		return "○"
+	}
+}
+
+func (l stageLight) style() lipgloss.Style {
+	switch l {
+	case lightDone:
+		return progressOnStyle
+	case lightActive:
+		return progressActiveStyle
+	case lightFailed:
+		return progressFailStyle
+	default:
+		return progressOffStyle
+	}
+}
+
+// stageIndex returns s's position in status.StageOrder, or -1 if absent.
+func stageIndex(s string) int {
+	for i, v := range status.StageOrder {
+		if v == s {
+			return i
+		}
+	}
+	return -1
+}
+
+// deriveStageLights maps a reported lifecycle stage plus the gh-detected pr/ci
+// state onto one light per status.StageOrder entry. It honours StageOrder's
+// monotonic rule — a reported stage implies every earlier stage is done — by
+// deriving purely from positions, so adding a stage to StageOrder needs no
+// change here (the "single source of truth" contract stage.go documents).
+// pr/ci are never taken from the reported stage (Claude can't report them); they
+// are overlaid by name from prog. An open PR (prog.prRaised) implies every stage
+// up to and including pr is done.
+func deriveStageLights(stage string, prog ghProgress) []stageLight {
+	lights := make([]stageLight, len(status.StageOrder)) // zero value lightPending
+
+	cur := stageIndex(stage)
+	for i := range lights {
+		switch {
+		case cur >= 0 && i < cur:
+			lights[i] = lightDone
+		case i == cur:
+			lights[i] = lightActive
+		}
+	}
+
+	if prog.prRaised {
+		if prIdx := stageIndex(status.StagePR); prIdx >= 0 {
+			for i := 0; i <= prIdx; i++ {
+				lights[i] = lightDone
+			}
+		}
+	}
+
+	if ciIdx := stageIndex(status.StageCI); ciIdx >= 0 {
+		switch prog.checks {
+		case ghx.ChecksPassing:
+			lights[ciIdx] = lightDone
+		case ghx.ChecksFailing:
+			lights[ciIdx] = lightFailed
+		default: // pending / none / "" → grey
+			lights[ciIdx] = lightPending
+		}
+	}
+
+	return lights
+}
+
+// renderStageStrip renders the lifecycle traffic lights for an active card.
+// Unselected → a single compact glyph line (● ● ◐ ○ ○ ○); selected → a vertical
+// labelled row per stage, honouring the task's "favour vertical space" goal.
+// innerW bounds each line so the strip never overflows a 20-col compact sidebar:
+// the label is clipped (the glyph + space prefix is always kept).
+func renderStageStrip(stage string, prog ghProgress, selected bool, innerW int) []string {
+	lights := deriveStageLights(stage, prog)
+
+	if !selected {
+		parts := make([]string, len(lights))
+		for i, l := range lights {
+			parts[i] = l.style().Render(l.glyph())
+		}
+		return []string{strings.Join(parts, " ")}
+	}
+
+	lines := make([]string, 0, len(lights))
+	for i, l := range lights {
+		label := truncate(status.StageOrder[i], innerW-2) // glyph + space = 2 cols
+		lines = append(lines, l.style().Render(l.glyph())+" "+progressLabelStyle.Render(label))
+	}
+	return lines
+}
 
 // typeEmoji maps a task type to a single-character glyph (or short emoji
 // sequence) shown on the task header row. Unknown types fall back to a
@@ -36,7 +159,10 @@ func typeEmoji(typ string) string {
 // has aged out rather than flipped back to active work.
 func activeBadge(t task.Task, sub *status.File) string {
 	state := "idle"
-	if sub != nil {
+	// An empty State is treated as idle too: it means "no activity report" —
+	// the same as a nil sub. This arises for a stage-only entry (T-053), where
+	// ReadAll surfaced a task by its stage file with no live activity file.
+	if sub != nil && sub.State != "" {
 		state = sub.State
 	}
 	switch state {
@@ -118,7 +244,7 @@ func renderPlaceholder(msg string) string {
 //
 // When selected, each line gets a left accent bar instead of the usual
 // left padding, so the highlight reads as a vertical stripe down the card.
-func renderCard(t task.Task, selected bool, width int, sub *status.File, compact bool) []string {
+func renderCard(t task.Task, selected bool, width int, sub *status.File, compact bool, prog ghProgress, showStrip bool) []string {
 	leftPad := "   "
 	if selected {
 		leftPad = " " + cursorBarStyle.Render("▍") + " "
@@ -147,6 +273,7 @@ func renderCard(t task.Task, selected bool, width int, sub *status.File, compact
 		lines = append(lines, leftPad+emoji+"  "+id)
 		lines = append(lines, leftPad+taskTitleStyle.Render(truncate(t.Title, innerW)))
 		lines = append(lines, leftPad+projectDimStyle.Render(truncate(t.Project, innerW)))
+		lines = appendStageStrip(lines, t, sub, prog, showStrip, selected, leftPad, innerW)
 		return lines
 	}
 
@@ -161,6 +288,25 @@ func renderCard(t task.Task, selected bool, width int, sub *status.File, compact
 	metaIndent := strings.Repeat(" ", lipgloss.Width(emoji)+2)
 	lines = append(lines, leftPad+metaIndent+proj)
 
+	lines = appendStageStrip(lines, t, sub, prog, showStrip, selected, leftPad, innerW)
+	return lines
+}
+
+// appendStageStrip appends the lifecycle progress strip to an active card's
+// lines when enabled (T-053). The reported stage comes from the merged status
+// file (sub.Stage; "" when sub is nil); pr/ci come from prog. Backlog cards and
+// the showStrip=false (config-disabled) case append nothing.
+func appendStageStrip(lines []string, t task.Task, sub *status.File, prog ghProgress, showStrip, selected bool, leftPad string, innerW int) []string {
+	if !showStrip || t.Status != "active" {
+		return lines
+	}
+	stage := ""
+	if sub != nil {
+		stage = sub.Stage
+	}
+	for _, sline := range renderStageStrip(stage, prog, selected, innerW) {
+		lines = append(lines, leftPad+sline)
+	}
 	return lines
 }
 
