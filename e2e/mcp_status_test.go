@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/squashbox/squash-ide/internal/status"
 )
 
 // TestMCP_InitializeThenStatus is the Go port of scripts/test-mcp-cycle.sh.
@@ -69,12 +71,32 @@ func TestMCP_InitializeThenStatus(t *testing.T) {
 		t.Errorf("tool name: %v", tools[0])
 	}
 
-	// --- tools/call squash_status -------------------------------------
+	// --- tools/call squash_status (no stage — backward compat) --------
 	must(t, stdin,
 		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"squash_status","arguments":{"state":"working","message":"hello"}}}`)
 	resp = readResponse(t, rd)
 	if resp["error"] != nil {
 		t.Fatalf("tool error: %+v", resp["error"])
+	}
+
+	// --- tools/call squash_status WITH stage (T-053) ------------------
+	t.Cleanup(func() {
+		_ = status.Remove("T-mcp-test")
+		_ = status.RemoveStage("T-mcp-test")
+	})
+	must(t, stdin,
+		`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"squash_status","arguments":{"state":"working","message":"coding","stage":"implementation"}}}`)
+	resp = readResponse(t, rd)
+	if resp["error"] != nil {
+		t.Fatalf("stage tool error: %+v", resp["error"])
+	}
+	// The binary writes to the real status dir; ReadAll merges the stage file.
+	all, err := status.ReadAll()
+	if err != nil {
+		t.Fatalf("status.ReadAll: %v", err)
+	}
+	if got := all["T-mcp-test"].Stage; got != "implementation" {
+		t.Errorf("merged stage = %q, want implementation", got)
 	}
 }
 

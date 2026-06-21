@@ -254,8 +254,10 @@ func CompleteWithPR(cfg config.Config, t task.Task, prOverride string) error {
 		}
 	}
 
-	// Clean up the MCP status file and any leftover notify marker.
+	// Clean up the MCP status file, the lifecycle stage file, and any leftover
+	// notify marker.
 	_ = status.Remove(t.ID)
+	_ = status.RemoveStage(t.ID)
 	_ = status.RemoveNotify(t.ID)
 
 	// Tear the task's pane down. Native panes are owned by the running TUI,
@@ -347,8 +349,10 @@ func Deactivate(cfg config.Config, t task.Task) error {
 
 	branch := BranchFor(t)
 
-	// Clean up the MCP status file and any leftover notify marker.
+	// Clean up the MCP status file, the lifecycle stage file, and any leftover
+	// notify marker.
 	_ = status.Remove(t.ID)
+	_ = status.RemoveStage(t.ID)
 	_ = status.RemoveNotify(t.ID)
 
 	// Tear the task's pane down. Native panes are owned by the running TUI

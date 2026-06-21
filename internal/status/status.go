@@ -23,12 +23,16 @@ var dirRef = Dir
 // than this are ignored by ReadAll (the Claude session likely exited).
 const StaleDuration = 5 * time.Minute
 
-// File represents a single task's runtime status on disk.
+// File represents a single task's runtime status. State/Message/Updated come
+// from the activity file T-NNN.json; Stage is merged in from the separate stage
+// file (stage.go) by ReadAll. The activity file on disk never carries Stage —
+// the omitempty keeps Write's output byte-identical to before T-053.
 type File struct {
 	TaskID  string `json:"task_id"`
-	State   string `json:"state"`   // idle, working, input_required, testing
-	Message string `json:"message"` // brief human-readable description
-	Updated int64  `json:"updated"` // unix timestamp
+	State   string `json:"state"`           // idle, working, input_required, testing
+	Message string `json:"message"`         // brief human-readable description
+	Updated int64  `json:"updated"`         // unix timestamp
+	Stage   string `json:"stage,omitempty"` // lifecycle stage, merged from the stage file (T-053)
 }
 
 // Write atomically writes a status file for the given task.
@@ -88,6 +92,13 @@ func ReadAll() (map[string]File, error) {
 		}
 		result[f.TaskID] = f
 	}
+
+	// Merge lifecycle stages (T-053) from the stage/ subdir. Stage files are
+	// isolated from the "T-*.json" glob above (different directory), so this is
+	// the single merge point. Stage-only entries (a fresh stage file with no/
+	// stale activity file) are surfaced too — a task can be mid-stage yet idle.
+	mergeStages(result)
+
 	return result, nil
 }
 

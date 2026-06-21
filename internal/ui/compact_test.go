@@ -260,7 +260,7 @@ func TestRenderCard_CompactBacklog_ThreeLines(t *testing.T) {
 		ID: "T-042", Type: "feature", Title: "An ordinary backlog title",
 		Project: "squash-ide", Status: "backlog",
 	}
-	lines := renderCard(tk, false, CompactListWidth, nil, true)
+	lines := renderCard(tk, false, CompactListWidth, nil, true, ghProgress{}, false)
 	if len(lines) != 3 {
 		t.Fatalf("compact backlog card: expected 3 lines (id/title/project), got %d: %v", len(lines), lines)
 	}
@@ -285,7 +285,7 @@ func TestRenderCard_CompactActive_FourLines(t *testing.T) {
 		ID: "T-042", Type: "feature", Title: "An active task with a long title",
 		Project: "squash-ide", Status: "active",
 	}
-	lines := renderCard(tk, false, CompactListWidth, nil, true)
+	lines := renderCard(tk, false, CompactListWidth, nil, true, ghProgress{}, false)
 	if len(lines) != 4 {
 		t.Fatalf("compact active card: expected 4 lines (badge/id/title/project), got %d: %v",
 			len(lines), lines)
@@ -324,8 +324,8 @@ func TestRenderCard_CompactIsOneLineTallerThanExpanded(t *testing.T) {
 				ID: "T-042", Type: "feature", Title: "Normal title",
 				Project: "squash-ide", Status: tc.status,
 			}
-			compactLines := renderCard(tk, false, CompactListWidth, nil, true)
-			expandedLines := renderCard(tk, false, 60, nil, false)
+			compactLines := renderCard(tk, false, CompactListWidth, nil, true, ghProgress{}, false)
+			expandedLines := renderCard(tk, false, 60, nil, false, ghProgress{}, false)
 			if got, want := len(compactLines), len(expandedLines)+1; got != want {
 				t.Errorf("compact should be exactly 1 line taller than expanded: compact=%d expanded=%d",
 					len(compactLines), len(expandedLines))
@@ -339,8 +339,8 @@ func TestRenderCard_NonCompact_PreservesProjectLine(t *testing.T) {
 		ID: "T-042", Type: "feature", Title: "Normal title",
 		Project: "squash-ide", Status: "backlog",
 	}
-	compactLines := renderCard(tk, false, CompactListWidth, nil, true)
-	normalLines := renderCard(tk, false, 60, nil, false)
+	compactLines := renderCard(tk, false, CompactListWidth, nil, true, ghProgress{}, false)
+	normalLines := renderCard(tk, false, 60, nil, false, ghProgress{}, false)
 
 	// Post-T-030 the relationship inverts: compact is now taller than
 	// non-compact because id and title each get their own row.
@@ -363,7 +363,7 @@ func TestRenderCard_CompactTruncatesLongTitle(t *testing.T) {
 		Project: "squash-ide",
 		Status:  "backlog",
 	}
-	lines := renderCard(tk, false, CompactListWidth, nil, true)
+	lines := renderCard(tk, false, CompactListWidth, nil, true, ghProgress{}, false)
 	if len(lines) != 3 {
 		t.Fatalf("expected 3 lines for compact backlog, got %d", len(lines))
 	}
@@ -387,7 +387,7 @@ func TestRenderCard_CompactTruncatesLongProject(t *testing.T) {
 		ID: "T-042", Type: "feature", Title: "short",
 		Project: "merton-planning-rag", Status: "backlog",
 	}
-	lines := renderCard(tk, false, CompactListWidth, nil, true)
+	lines := renderCard(tk, false, CompactListWidth, nil, true, ghProgress{}, false)
 	if len(lines) != 3 {
 		t.Fatalf("expected 3 lines, got %d", len(lines))
 	}
@@ -402,7 +402,7 @@ func TestRenderCard_CompactSelected_CursorStripeAllLines(t *testing.T) {
 		ID: "T-042", Type: "feature", Title: "Selected title",
 		Project: "squash-ide", Status: "active",
 	}
-	lines := renderCard(tk, true, CompactListWidth, nil, true)
+	lines := renderCard(tk, true, CompactListWidth, nil, true, ghProgress{}, false)
 	if len(lines) != 4 {
 		t.Fatalf("expected 4 lines for selected compact active, got %d", len(lines))
 	}
@@ -418,7 +418,7 @@ func TestRenderCard_Compact_EmptyTitle(t *testing.T) {
 		ID: "T-042", Type: "feature", Title: "",
 		Project: "squash-ide", Status: "backlog",
 	}
-	lines := renderCard(tk, false, CompactListWidth, nil, true)
+	lines := renderCard(tk, false, CompactListWidth, nil, true, ghProgress{}, false)
 	if len(lines) != 3 {
 		t.Fatalf("empty title should not collapse card: expected 3 lines, got %d: %v", len(lines), lines)
 	}
@@ -429,7 +429,7 @@ func TestRenderCard_Compact_EmptyProject(t *testing.T) {
 		ID: "T-042", Type: "feature", Title: "Title",
 		Project: "", Status: "active",
 	}
-	lines := renderCard(tk, false, CompactListWidth, nil, true)
+	lines := renderCard(tk, false, CompactListWidth, nil, true, ghProgress{}, false)
 	if len(lines) != 4 {
 		t.Fatalf("empty project should not collapse card: expected 4 lines, got %d: %v", len(lines), lines)
 	}
@@ -442,7 +442,7 @@ func TestRenderCard_CompactEastAsianWidth(t *testing.T) {
 		Title:   "日本語タイトル日本語タイトル日本語タイトル",
 		Project: "p", Status: "backlog",
 	}
-	lines := renderCard(tk, false, CompactListWidth, nil, true)
+	lines := renderCard(tk, false, CompactListWidth, nil, true, ghProgress{}, false)
 	for i, line := range lines {
 		if w := lipgloss.Width(line); w > CompactListWidth {
 			t.Errorf("line %d width %d exceeds %d: %q", i, w, CompactListWidth, line)

@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -13,6 +14,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/squashbox/squash-ide/internal/config"
 	"github.com/squashbox/squash-ide/internal/dispatch"
+	"github.com/squashbox/squash-ide/internal/ghx"
 	"github.com/squashbox/squash-ide/internal/pane"
 	"github.com/squashbox/squash-ide/internal/spawner"
 	"github.com/squashbox/squash-ide/internal/status"
@@ -135,6 +137,14 @@ type Model struct {
 	// MCP status polling
 	subStatuses map[string]status.File // keyed by task ID
 
+	// Lifecycle progress (T-053). prProgress caches the gh-detected PR/CI state
+	// per active task, refreshed on the throttled tickProgress poll (gh is
+	// network — it must never ride the 1 s tickStatus loop). progressStarted is
+	// a one-shot guard so the recurring poll is kicked exactly once, after the
+	// first task load. Keyed by task ID.
+	prProgress      map[string]ghProgress
+	progressStarted bool
+
 	// Dispatch / cleanup state
 	confirming   *task.Task   // non-nil when spawn confirmation dialog is showing
 	completing   *task.Task   // non-nil when complete confirmation dialog is showing
@@ -233,6 +243,12 @@ type statusTickMsg struct {
 	focusTaskID string
 }
 
+// progressTickMsg carries the freshly-polled gh PR/CI state for active tasks
+// (T-053). Emitted by tickProgress / pollProgressNow.
+type progressTickMsg struct {
+	progress map[string]ghProgress
+}
+
 // paneOutputMsg is emitted (native mode) when the pane manager signals output
 // or a state change. Its only job is to trigger a re-View; the handler
 // re-arms waitForPaneOutput for the next signal.
@@ -264,6 +280,80 @@ func (m Model) tickStatus() tea.Cmd {
 			}
 		}
 		return msg
+	})
+}
+
+// progressPollInterval throttles the gh network poll. gh shells out over the
+// network, so it must NOT ride the 1 s tickStatus loop.
+const progressPollInterval = 20 * time.Second
+
+// progressProbe is a snapshot of what tickProgress needs to query one task,
+// captured at command-arm time (branch + worktree path are pure derivations).
+type progressProbe struct {
+	id       string
+	repoPath string // the task's worktree — shares origin with the main repo
+	branch   string
+}
+
+// progressProbes snapshots the active tasks to poll. Returns nil when CI polling
+// is disabled (cfg.Progress.PollCI=false) so the poll issues no gh call and the
+// pr/ci lights stay grey.
+func (m Model) progressProbes() []progressProbe {
+	if !m.cfg.Progress.PollCI {
+		return nil
+	}
+	var probes []progressProbe
+	for _, t := range m.allTasks {
+		if t.Status != "active" {
+			continue
+		}
+		wt, err := dispatch.WorktreePathFor(m.cfg, t)
+		if err != nil {
+			continue
+		}
+		probes = append(probes, progressProbe{id: t.ID, repoPath: wt, branch: dispatch.BranchFor(t)})
+	}
+	return probes
+}
+
+// runProgressPoll queries gh for each probe and rolls the results into a
+// progressTickMsg. A single PRChecksForBranch call per task yields both signals:
+// a non-error result means the PR exists (prRaised) and carries the CI rollup;
+// ErrNoPR means no PR yet. gh errors are swallowed (degrade to grey, never an
+// error badge): a missing PR, absent gh (ErrGHMissing), or any transient failure
+// leaves that task's lights grey. Runs inside a tea.Cmd goroutine.
+func runProgressPoll(probes []progressProbe) tea.Msg {
+	progress := make(map[string]ghProgress, len(probes))
+	for _, p := range probes {
+		var gp ghProgress
+		cs, err := ghx.PRChecksForBranch(p.repoPath, p.branch)
+		switch {
+		case err == nil:
+			gp.prRaised = true // a non-error result means an open PR exists
+			gp.checks = cs
+		case errors.Is(err, ghx.ErrNoPR):
+			gp.checks = ghx.ChecksNone // no PR raised yet — pr/ci stay grey
+		default:
+			uidebugf("progress poll: %s: %v", p.id, err)
+			gp.checks = ghx.ChecksNone
+		}
+		progress[p.id] = gp
+	}
+	return progressTickMsg{progress: progress}
+}
+
+// scheduleProgress arms a gh poll. delay <= 0 runs it immediately (the one-shot
+// kick after the first task load, so the strip lights up without waiting a full
+// interval); a positive delay wraps it in a tea.Tick (the recurring throttle).
+// Probes are snapshotted now; the progressTickMsg handler re-arms with the
+// then-current active set.
+func (m Model) scheduleProgress(delay time.Duration) tea.Cmd {
+	probes := m.progressProbes()
+	if delay <= 0 {
+		return func() tea.Msg { return runProgressPoll(probes) }
+	}
+	return tea.Tick(delay, func(time.Time) tea.Msg {
+		return runProgressPoll(probes)
 	})
 }
 
@@ -503,6 +593,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.RespawnFunc(m.allTasks)
 			}
 		}
+		// Kick the lifecycle progress poll once, now that active tasks are
+		// loaded (T-053). pollProgressNow gives an immediate read; its handler
+		// arms the recurring throttled tickProgress.
+		if m.cfg.Progress.Show && !m.progressStarted {
+			m.progressStarted = true
+			return m, tea.Batch(tea.ClearScreen, m.scheduleProgress(0))
+		}
 		return m, tea.ClearScreen
 
 	case dispatchDoneMsg:
@@ -621,7 +718,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				oldSub, oldOK := old[t.ID]
 				switch {
 				case newOK:
-					m.manager.SetStateByTask(t.ID, newSub.State)
+					// A stage-only entry (T-053) has State="" — no live activity
+					// report. Paint it idle, not the default WORKING, so the pane
+					// border agrees with the list badge (activeBadge does the same).
+					state := newSub.State
+					if state == "" {
+						state = pane.StateIdle
+					}
+					m.manager.SetStateByTask(t.ID, state)
 				case oldOK:
 					m.manager.SetStateByTask(t.ID, pane.StateIdle)
 				}
@@ -680,12 +784,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				newSub, newOK := msg.statuses[t.ID]
 				oldSub, oldOK := old[t.ID]
+				// A stage-only entry (T-053, State="") is treated as idle — the
+				// same collapse activeBadge applies — so the pane border never
+				// flashes WORKING for a task with a stage but no live activity.
 				newState := "idle"
-				if newOK {
+				if newOK && newSub.State != "" {
 					newState = newSub.State
 				}
 				oldState := "idle"
-				if oldOK {
+				if oldOK && oldSub.State != "" {
 					oldState = oldSub.State
 				}
 				// Skip when we've never seen an entry for this task (both
@@ -704,6 +811,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, m.tickStatus()
+
+	case progressTickMsg:
+		// Cache the gh-detected pr/ci state and re-arm the throttled poll
+		// (T-053). Whole-map replace: stale entries for completed tasks drop
+		// out naturally as the active set shrinks.
+		m.prProgress = msg.progress
+		return m, m.scheduleProgress(progressPollInterval)
 
 	case tea.KeyMsg:
 		newModel, cmd := m.handleKey(msg)
@@ -1393,11 +1507,63 @@ func (m *Model) updateDetailContent() {
 		}
 	}
 
+	// Full lifecycle-stage breakdown for the selected active task (T-053): a
+	// row per stage, favouring vertical space over a cramped strip.
+	var progress string
+	if t.Status == "active" && m.cfg.Progress.Show {
+		stage := ""
+		if s, ok := m.subStatuses[t.ID]; ok {
+			stage = s.Stage
+		}
+		progress = "\n\n" + m.renderStageBreakdown(t, stage, m.prProgress[t.ID])
+	}
+
 	body := detailBodyStyle.Render(t.Body)
-	content := header + "\n" + meta + extra + "\n\n" + body
+	content := header + "\n" + meta + extra + progress + "\n\n" + body
 
 	m.viewport.SetContent(content)
 	m.viewport.GotoTop()
+}
+
+// renderStageBreakdown renders the detail-view lifecycle section: a "Progress:"
+// heading, one labelled traffic-light row per stage, and a trailing activity
+// line (the current state/message + how long ago it was reported). stage is the
+// reported lifecycle stage (from the merged status file); prog the gh-detected
+// pr/ci state.
+func (m Model) renderStageBreakdown(t task.Task, stage string, prog ghProgress) string {
+	lights := deriveStageLights(stage, prog)
+	var b strings.Builder
+	b.WriteString(detailBodyStyle.Render(sectionLabelStyle.Render("Progress")))
+	b.WriteString("\n")
+	for i, l := range lights {
+		b.WriteString(detailBodyStyle.Render("  " + l.style().Render(l.glyph()) + " " + progressLabelStyle.Render(status.StageOrder[i])))
+		b.WriteString("\n")
+	}
+	if s, ok := m.subStatuses[t.ID]; ok && s.State != "" {
+		line := fmt.Sprintf("  %s", s.State)
+		if s.Message != "" {
+			line += " — " + s.Message
+		}
+		if s.Updated > 0 {
+			line += fmt.Sprintf("  (%s ago)", relativeSince(s.Updated))
+		}
+		b.WriteString(detailBodyStyle.Render(progressLabelStyle.Render(line)))
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// relativeSince renders a unix timestamp as a coarse "Ns / Nm / Nh" age,
+// matching the staleness-horizon granularity the status pipeline cares about.
+func relativeSince(unix int64) string {
+	d := time.Since(time.Unix(unix, 0))
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	default:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	}
 }
 
 // View renders the UI.
@@ -1670,7 +1836,9 @@ func (m Model) renderCardList(width, height int, compact bool) string {
 		if s, ok := m.subStatuses[item.task.ID]; ok {
 			sub = &s
 		}
-		card := renderCard(item.task, selected, width, sub, compact)
+		prog := m.prProgress[item.task.ID]
+		showStrip := m.cfg.Progress.Show
+		card := renderCard(item.task, selected, width, sub, compact, prog, showStrip)
 
 		if selected {
 			cursorStart = len(lines)

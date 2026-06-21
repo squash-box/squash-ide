@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/squashbox/squash-ide/internal/status"
 )
@@ -61,6 +62,7 @@ type toolCallParams struct {
 type statusArgs struct {
 	State   string `json:"state"`
 	Message string `json:"message"`
+	Stage   string `json:"stage"`
 }
 
 // --- Server ----------------------------------------------------------------
@@ -131,7 +133,7 @@ func handleRequest(taskID string, req *jsonRPCRequest) *jsonRPCResponse {
 			"tools": []map[string]any{
 				{
 					"name":        "squash_status",
-					"description": "Report your current status to the squash-ide dashboard. Call this when your activity phase changes (starting work, running tests, going idle). Note: tool-permission dialogs (e.g. 'Do you want to make this edit?') are handled automatically by Claude Code hooks — you do not need to report input_required for those.",
+					"description": "Report your current status to the squash-ide dashboard. `state` is what you are doing right now (working/testing/idle); the optional `stage` is how far through the task's lifecycle you are (planning→implementation→testing→acceptance) — report it at each phase boundary and the dashboard lights up a progress strip. The two are orthogonal: report both as they change. Note: tool-permission dialogs (e.g. 'Do you want to make this edit?') are handled automatically by Claude Code hooks — you do not need to report input_required for those.",
 					"inputSchema": map[string]any{
 						"type": "object",
 						"properties": map[string]any{
@@ -143,6 +145,11 @@ func handleRequest(taskID string, req *jsonRPCRequest) *jsonRPCResponse {
 							"message": map[string]any{
 								"type":        "string",
 								"description": "Brief description of current activity (max 80 chars)",
+							},
+							"stage": map[string]any{
+								"type":        "string",
+								"enum":        status.ClaudeStages,
+								"description": "Optional lifecycle stage you have reached (monotonic — reporting one implies all earlier stages are done): planning (drafting the plan), implementation (writing code), testing (running the suite), acceptance (verifying acceptance criteria). The pr and ci stages are detected automatically; do not report them.",
 							},
 						},
 						"required": []string{"state", "message"},
@@ -185,6 +192,24 @@ func handleToolCall(taskID string, req *jsonRPCRequest) *jsonRPCResponse {
 	}
 
 	fmt.Fprintf(os.Stderr, "squash-ide-mcp: %s → %s: %s\n", taskID, args.State, args.Message)
+
+	// Stage is optional and orthogonal to state. An unknown stage is a
+	// tool-result error (not a JSON-RPC error), matching the unknown-tool
+	// precedent above; the activity write above still stands. pr/ci are never
+	// accepted here — they are squash-ide-detected via gh.
+	if args.Stage != "" {
+		if !status.ValidClaudeStage(args.Stage) {
+			return success(req.ID, mcpToolResult{
+				Content: []mcpContent{{Type: "text", Text: fmt.Sprintf(
+					"unknown stage %q (allowed: %s)", args.Stage, strings.Join(status.ClaudeStages, ", "))}},
+				IsError: true,
+			})
+		}
+		if err := status.WriteStage(taskID, args.Stage); err != nil {
+			return errResp(req.ID, -32000, fmt.Sprintf("stage write failed: %v", err))
+		}
+		fmt.Fprintf(os.Stderr, "squash-ide-mcp: %s → stage=%s\n", taskID, args.Stage)
+	}
 
 	// Fire desktop notification for input_required, drop the dedup marker
 	// on every other transition so the next input_required is fresh.

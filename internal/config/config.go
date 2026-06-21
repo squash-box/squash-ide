@@ -67,6 +67,16 @@ const (
 	LayoutResponsive = "responsive"
 )
 
+// Progress controls the per-task lifecycle progress strip in the task view
+// (T-053). Show toggles the strip entirely; PollCI toggles the throttled `gh`
+// network poll that drives the pr/ci lights (disable it to keep squash-ide
+// off the network — the four Claude-reported stage lights still render).
+// Both default true, so absent config keeps the current-equivalent behaviour.
+type Progress struct {
+	Show   bool `yaml:"show"`
+	PollCI bool `yaml:"poll_ci"`
+}
+
 // Tmux controls the v2 single-terminal tiled-pane workflow (T-011).
 // When Enabled, squash-ide bootstraps a tmux session and opens spawned tasks
 // as new panes to the right of the TUI instead of new OS terminal windows.
@@ -85,6 +95,7 @@ type Config struct {
 	Terminal Terminal `yaml:"terminal"`
 	Spawn    Spawn    `yaml:"spawn"`
 	Tmux     Tmux     `yaml:"tmux"`
+	Progress Progress `yaml:"progress"`
 
 	// Layout selects the native engine's pane layout strategy (T-040), one of
 	// the Layout* constants. Default "responsive". Ignored under engine: tmux.
@@ -96,6 +107,7 @@ type Config struct {
 
 	// Sources records the provenance of each resolved field.
 	// Keys: "vault", "engine", "layout", "focus_follows_input",
+	// "progress.show", "progress.poll_ci",
 	// "terminal.command", "terminal.args", "spawn.command", "spawn.args",
 	// "tmux.enabled", "tmux.session_name", "tmux.tui_width", "tmux.min_pane_width".
 	Sources map[string]Source `yaml:"-"`
@@ -153,11 +165,17 @@ func Defaults() Config {
 			PaneWidth:    80,
 			MinPaneWidth: 80,
 		},
+		Progress: Progress{
+			Show:   true,
+			PollCI: true,
+		},
 		Sources: map[string]Source{
 			"vault":               SourceDefault,
 			"engine":              SourceDefault,
 			"layout":              SourceDefault,
 			"focus_follows_input": SourceDefault,
+			"progress.show":       SourceDefault,
+			"progress.poll_ci":    SourceDefault,
 			"terminal.command":    SourceDefault,
 			"terminal.args":       SourceDefault,
 			"spawn.command":       SourceDefault,
@@ -261,16 +279,24 @@ type fileTmux struct {
 	MinPaneWidth int    `yaml:"min_pane_width"`
 }
 
+// fileProgress mirrors Progress with *bool fields so "omitted" (nil) is
+// distinguishable from "explicitly false".
+type fileProgress struct {
+	Show   *bool `yaml:"show"`
+	PollCI *bool `yaml:"poll_ci"`
+}
+
 // fileConfig is the parse-only shape of the YAML file. It mirrors Config
 // but uses pointers / sentinel zeros where needed for presence detection.
 type fileConfig struct {
-	Vault             string    `yaml:"vault"`
-	Engine            string    `yaml:"engine"`
-	Layout            string    `yaml:"layout"`
-	FocusFollowsInput *bool     `yaml:"focus_follows_input"`
-	Terminal          Terminal  `yaml:"terminal"`
-	Spawn             Spawn     `yaml:"spawn"`
-	Tmux              *fileTmux `yaml:"tmux"`
+	Vault             string        `yaml:"vault"`
+	Engine            string        `yaml:"engine"`
+	Layout            string        `yaml:"layout"`
+	FocusFollowsInput *bool         `yaml:"focus_follows_input"`
+	Terminal          Terminal      `yaml:"terminal"`
+	Spawn             Spawn         `yaml:"spawn"`
+	Tmux              *fileTmux     `yaml:"tmux"`
+	Progress          *fileProgress `yaml:"progress"`
 }
 
 // applyFile reads the YAML config at path (if it exists) and overlays its
@@ -344,6 +370,16 @@ func applyFile(cfg *Config, path string) error {
 			cfg.Sources["tmux.min_pane_width"] = SourceFile
 		}
 	}
+	if fc.Progress != nil {
+		if fc.Progress.Show != nil {
+			cfg.Progress.Show = *fc.Progress.Show
+			cfg.Sources["progress.show"] = SourceFile
+		}
+		if fc.Progress.PollCI != nil {
+			cfg.Progress.PollCI = *fc.Progress.PollCI
+			cfg.Sources["progress.poll_ci"] = SourceFile
+		}
+	}
 	return nil
 }
 
@@ -364,6 +400,14 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("SQUASH_FOCUS_FOLLOWS_INPUT"); v != "" {
 		cfg.FocusFollowsInput = isTruthy(v)
 		cfg.Sources["focus_follows_input"] = SourceEnv
+	}
+	if v := os.Getenv("SQUASH_PROGRESS_SHOW"); v != "" {
+		cfg.Progress.Show = isTruthy(v)
+		cfg.Sources["progress.show"] = SourceEnv
+	}
+	if v := os.Getenv("SQUASH_PROGRESS_POLL_CI"); v != "" {
+		cfg.Progress.PollCI = isTruthy(v)
+		cfg.Sources["progress.poll_ci"] = SourceEnv
 	}
 	if v := os.Getenv("SQUASH_TERMINAL"); v != "" {
 		cfg.Terminal.Command = v
@@ -464,6 +508,8 @@ func (c Config) Format() string {
 	fmt.Fprintf(&b, "tmux.tui_width: %d (from %s)\n", c.Tmux.TUIWidth, source(c, "tmux.tui_width"))
 	fmt.Fprintf(&b, "tmux.pane_width: %d (from %s)\n", c.Tmux.PaneWidth, source(c, "tmux.pane_width"))
 	fmt.Fprintf(&b, "tmux.min_pane_width: %d (from %s)\n", c.Tmux.MinPaneWidth, source(c, "tmux.min_pane_width"))
+	fmt.Fprintf(&b, "progress.show: %t (from %s)\n", c.Progress.Show, source(c, "progress.show"))
+	fmt.Fprintf(&b, "progress.poll_ci: %t (from %s)\n", c.Progress.PollCI, source(c, "progress.poll_ci"))
 	return b.String()
 }
 
