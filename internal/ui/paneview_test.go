@@ -38,10 +38,25 @@ type stubManager struct {
 	focusPrevCount  int
 	collapseToggles int
 	ticks           int
+
+	// T-050 modal-popover recording.
+	modalSpawns     []pane.SpawnSpec
+	modalBoxes      []pane.Rect
+	modalSpawnErr   error // when set, SpawnModal returns it (exercises the error path)
+	hasModal        bool
+	writtenToModal  [][]byte
+	modalResizes    []pane.Rect
+	closeModalCount int
+	modalDone       chan struct{}
 }
 
 func newStubManager() *stubManager {
-	return &stubManager{repaint: make(chan struct{}, 1), states: map[string]string{}, canSpawn: true}
+	return &stubManager{
+		repaint:   make(chan struct{}, 1),
+		states:    map[string]string{},
+		canSpawn:  true,
+		modalDone: make(chan struct{}),
+	}
 }
 
 func (s *stubManager) Resize(region pane.Rect) {
@@ -94,6 +109,34 @@ func (s *stubManager) FocusNext()                   { s.focusNextCount++ }
 func (s *stubManager) FocusPrev()                   { s.focusPrevCount++ }
 func (s *stubManager) ToggleCollapseFocused()       { s.collapseToggles++ }
 func (s *stubManager) Tick()                        { s.ticks++ }
+
+func (s *stubManager) SpawnModal(spec pane.SpawnSpec, box pane.Rect) (*pane.Pane, error) {
+	s.modalSpawns = append(s.modalSpawns, spec)
+	s.modalBoxes = append(s.modalBoxes, box)
+	if s.modalSpawnErr != nil {
+		return nil, s.modalSpawnErr
+	}
+	s.hasModal = true
+	return nil, nil // the Model never dereferences the returned pane in tests
+}
+
+func (s *stubManager) ModalPane() *pane.Pane { return nil }
+func (s *stubManager) HasModal() bool        { return s.hasModal }
+
+func (s *stubManager) WriteToModal(b []byte) (int, error) {
+	cp := append([]byte(nil), b...)
+	s.writtenToModal = append(s.writtenToModal, cp)
+	return len(b), nil
+}
+
+func (s *stubManager) ModalDone() <-chan struct{} { return s.modalDone }
+func (s *stubManager) ResizeModal(box pane.Rect)  { s.modalResizes = append(s.modalResizes, box) }
+
+func (s *stubManager) CloseModal() error {
+	s.closeModalCount++
+	s.hasModal = false
+	return nil
+}
 
 // nativeModel builds a native-engine Model wired to a stub manager, pre-loaded
 // with tasks and a default size, ready to drive through Update/View directly.

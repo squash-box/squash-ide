@@ -298,6 +298,18 @@ the next *genuinely new* prompt (after the agent makes progress) surfaces again.
 A modal/form/filter/detail view open in the list likewise suppresses surfacing
 so a background pane never yanks focus mid-interaction.
 
+**Task-creation popover.** Pressing `t` and submitting the new-task form hands
+off to the `/log-task` Claude skill. Under `engine: native` that interactive
+session runs in a **centered popover** composited *over* the tiled spawn region —
+the spawned panes stay visible, framed around the box, instead of the screen
+blanking to a fullscreen Claude takeover (which is what the tmux engine still
+does via `tea.ExecProcess`, and which under the native engine would look like
+squash-ide had crashed). Every keystroke — including `ctrl+c` (interrupt) and
+`ctrl+d` (finish) — goes to the popover's Claude session; when it exits the
+popover closes, focus returns to the list, and the new task appears. `ctrl+\` is
+a force-close hatch that dismisses a wedged popover and returns you to the list
+without quitting squash-ide.
+
 ```bash
 squash-ide --engine native --layout responsive --focus-follows-input true
 ```
