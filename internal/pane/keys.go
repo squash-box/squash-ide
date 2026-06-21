@@ -99,9 +99,10 @@ func withAlt(k tea.KeyMsg, seq string) []byte {
 // carries the button index plus motion and modifier bits; coordinates are
 // 1-based.
 //
-// Full mouse routing into the child is owned by T-040; this encoder is the pure,
-// tested primitive that work will build on. It returns nil for an event it
-// cannot map.
+// This is the pure, tested primitive mouse routing builds on. The UI's
+// click-to-focus handler (T-051) calls it to forward a press on the focused pane
+// to its child PTY (Manager.WriteToFocused), the mouse dual of EncodeKey. It
+// returns nil for an event it cannot map.
 func EncodeMouse(m tea.MouseMsg) []byte {
 	cb, ok := mouseButtonCode(m.Button)
 	if !ok {

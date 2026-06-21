@@ -231,7 +231,11 @@ In native mode the TUI draws the task list on the left and the native pane
 region on the right, joined at full terminal width — no tmux session is
 created. Press `Ctrl+W` to hand keyboard focus to the pane region (keys then
 route to the focused pane) and `Ctrl+W` again to return focus to the list;
-`Ctrl+C` always quits. Resizing the terminal reflows the region in-process.
+`Ctrl+C` always quits. You can also **click a pane to focus it**; once it is
+focused, clicks and wheel scroll inside it route through to the child (e.g.
+Claude's UI). Resizing the terminal reflows the region in-process. (Clicking a
+tab in the tab strip, or a row in the task list, is not yet wired — use `[`/`]`
+and the arrow keys for those.)
 
 Native mode is at functional parity with tmux for the core lifecycle: pressing
 `Enter` on a backlog task launches Claude in a native pane (the list keeps

@@ -719,6 +719,66 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return updated, cmd
 		}
 		return newModel, cmd
+
+	case tea.MouseMsg:
+		// Native engine only — the tmux program is built without mouse support, so
+		// it never receives a MouseMsg, but guard defensively. Click-to-focus and
+		// forward-to-child (T-051); tmux handles its own mouse natively.
+		if m.engineNative {
+			return m.handleMouse(msg)
+		}
+		return m, nil
+	}
+	return m, nil
+}
+
+// handleMouse routes a mouse event under the native engine: a left-click (or any
+// button press / wheel) on an unfocused pane *selects* it — the mouse dual of the
+// ctrl+w focus-acquire gesture — and a press on the already-focused pane is
+// *forwarded* to its child PTY via the tested EncodeMouse primitive, the
+// symmetric mirror of handlePaneFocusedKey's gesture-vs-forward split. It is a
+// no-op while a modal/dialog/detail/too-narrow view owns the screen (the pane
+// region isn't drawn) or for a click that hits no addressable pane.
+func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	// A modal / dialog / detail view owns the screen and the pane region isn't
+	// drawn — ignore the click so a stray press behind an overlay can't move focus.
+	// Mirrors the focus-follows-input modal suppression (inModalState, T-048).
+	if m.inModalState() {
+		return m, nil
+	}
+	// Only presses (button clicks and wheel) route; plain motion and release are
+	// ignored so a moving pointer never thrashes focus.
+	if msg.Action != tea.MouseActionPress {
+		return m, nil
+	}
+	id, ok := m.manager.TaskAtPoint(msg.X, msg.Y)
+	if !ok {
+		// The click landed on the list, the gutter, or a tab strip — list-row and
+		// tab-strip click-to-select are out of scope (T-051); leave focus as-is.
+		return m, nil
+	}
+	// Focus-acquire: a click on a pane that is not the focused one (or while focus
+	// is on the list) is the explicit "I want this pane" gesture — the mouse dual
+	// of ctrl+w. The press is consumed, not forwarded. Clearing the pane's
+	// dismissedFocus entry re-arms focus-follows-input for it: a deliberate user
+	// gesture overrides the standing-prompt suppression (T-048 symmetry; delete on
+	// a nil map is a safe no-op). FocusByTask's ErrUnknownPane (pane closed between
+	// render and click) is swallowed so a stray click never flips the TUI into an
+	// error state.
+	if !m.paneFocused || id != m.manager.FocusedTaskID() {
+		if err := m.manager.FocusByTask(id); err == nil {
+			m.paneFocused = true
+			delete(m.dismissedFocus, id)
+			uidebugf("mouse focus -> %s", id)
+		}
+		return m, nil
+	}
+	// Forward-to-child: the press targets the already-focused pane, so deliver it
+	// to the child PTY (in-pane clicks and wheel scroll reach claude's UI). An
+	// unmappable event (EncodeMouse nil) is dropped; the write count/err is
+	// discarded, matching handlePaneFocusedKey's idiom.
+	if b := pane.EncodeMouse(msg); b != nil && m.manager != nil {
+		_, _ = m.manager.WriteToFocused(b)
 	}
 	return m, nil
 }
