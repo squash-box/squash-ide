@@ -95,11 +95,12 @@ func TestIsCompact_WindowWidthArm(t *testing.T) {
 	}
 }
 
-// TestNativeListCompact_TruthTable covers the space-driven native predicate
-// (T-052). The trigger is m.width < tuiWidth()+gutter+nativeMinPaneWidth (with
-// the default 60-col list: < 101), guarded by engineNative, a positive width,
-// and a full list wider than the compact width. Independent of the tmux
-// active-spawn/CompactTriggerWidth heuristic.
+// TestNativeListCompact_TruthTable covers the space-driven native predicate,
+// now a thin "list below its full width" check over nativeListWidth. The
+// boundary is unchanged from the binary T-052 collapse — true once
+// m.width < tuiWidth()+gutter+nativeMinPaneWidth (with the default 60-col list:
+// < 101) — guarded by engineNative and a positive width. Independent of the
+// tmux active-spawn/CompactTriggerWidth heuristic.
 func TestNativeListCompact_TruthTable(t *testing.T) {
 	mgr := newStubManager()
 	cases := []struct {

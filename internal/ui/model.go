@@ -1503,26 +1503,47 @@ func (m Model) View() string {
 }
 
 func (m Model) listViewRender() string {
-	// The task list is normally rendered at cfg.Tmux.TUIWidth (default 60).
-	// In compact mode it collapses to CompactListWidth to free horizontal
-	// space for the tiled panes. Two independent triggers feed this: the tmux
-	// path (isCompact — narrow terminal + 2+ active spawns) and the native path
-	// (nativeListCompact — the full list would starve the pane region, T-052).
-	compact := m.isCompact() || m.nativeListCompact()
-	width := m.width
+	// The task list width comes from one of three paths. The tmux path
+	// (isCompact — narrow terminal + 2+ active spawns) pins the pane to
+	// CompactListWidth. The native path scales the list responsively between
+	// CompactListWidth and tuiWidth, ceding the rest to the pane region (see
+	// nativeListWidth). Everything else clamps the terminal width to
+	// [40, maxWidth].
 	maxWidth := m.cfg.Tmux.TUIWidth
 	if maxWidth <= 0 {
 		maxWidth = 60
 	}
-	if compact {
+	var width int
+	switch {
+	case m.isCompact():
 		width = CompactListWidth
-	} else {
+	case m.engineNative:
+		width = m.nativeListWidth()
+	default:
+		width = m.width
 		if width > maxWidth {
 			width = maxWidth
 		}
 		if width < 40 {
 			width = 40
 		}
+	}
+
+	// Compact chrome (condensed top bar, denser cards, short help) engages only
+	// once the list is too narrow for the full layout's expanded cards to stay
+	// legible (fullChromeMinWidth). The width above scales continuously; the
+	// chrome switches at this step, so full chrome holds across most of the
+	// list's range and only collapses near the compact floor.
+	compact := width < fullChromeMinWidth
+
+	// Clamp every line to the list width. The help/status lines are wider than
+	// the list (the full help is ~117 cols), and unlike the tmux engine — where
+	// the pane boundary clips the column for free — the native engine joins this
+	// block directly against the pane region. Without the clip the widest line
+	// would dictate the column width, shoving the panes off-screen. MaxWidth
+	// truncates the overflow, restoring the parity tmux got from its pane edge.
+	clamp := func(s string) string {
+		return lipgloss.NewStyle().MaxWidth(width).Render(s)
 	}
 
 	var b strings.Builder
@@ -1551,7 +1572,7 @@ func (m Model) listViewRender() string {
 		b.WriteString(m.renderStatusBar())
 		b.WriteString("\n")
 		b.WriteString(helpStyle.Render("[tab] field  [←/→] type  [enter] submit  [ctrl+d] submit from prompt  [esc] cancel"))
-		return b.String()
+		return clamp(b.String())
 	}
 
 	if len(m.allTasks) == 0 {
@@ -1561,7 +1582,7 @@ func (m Model) listViewRender() string {
 		b.WriteString("\n\n")
 		b.WriteString(helpStyle.Render("[r] refresh  [q] quit"))
 		b.WriteString("\n")
-		return b.String()
+		return clamp(b.String())
 	}
 
 	// Reserve rows: top bar + divider + (filter row?) + status bar + help.
@@ -1633,7 +1654,7 @@ func (m Model) listViewRender() string {
 	}
 	b.WriteString("\n")
 
-	return b.String()
+	return clamp(b.String())
 }
 
 // renderCardList renders the per-section card list, scrolling to keep the
