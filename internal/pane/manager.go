@@ -42,12 +42,6 @@ type Manager struct {
 	// (T-040). Keyed by pane id; toggling reflows the siblings.
 	collapsed map[string]bool
 
-	// focusFollowsInput, when true, surfaces a pane that enters
-	// StateInputRequired by giving it focus — the in-TUI dual of the [[T-034]]
-	// notification click. Configurable because some users won't want focus
-	// stolen.
-	focusFollowsInput bool
-
 	// blinkOn is the badge-animation phase, flipped by Tick. It rides the UI's
 	// status tick rather than a timer of its own (the [[T-024]]/T-040 idiom), so
 	// the input_required badge pulses without a new goroutine.
@@ -72,10 +66,6 @@ func WithConstraints(c Constraints) Option { return func(m *Manager) { m.constra
 // WithStarter overrides the PTY seam. Tests inject a fake starter so Spawn
 // never forks a real process — the internal/exec.Runner pattern.
 func WithStarter(s ptyStarter) Option { return func(m *Manager) { m.starter = s } }
-
-// WithFocusFollowsInput sets whether a pane entering input_required auto-focuses
-// (default off; the UI enables it from config).
-func WithFocusFollowsInput(on bool) Option { return func(m *Manager) { m.focusFollowsInput = on } }
 
 // NewManager builds a Manager with sensible defaults, applying any options.
 func NewManager(opts ...Option) *Manager {
@@ -248,6 +238,13 @@ func (m *Manager) FocusByTask(taskID string) error {
 // the native pane. Unknown task id is a silent no-op; a dead pane ignores the
 // write (Pane.SetState freezes once dead), preserving the [[T-035]] remain-on-
 // exit badge.
+//
+// Badge-only: this NEVER moves focus (T-048). Focus-follows-input is owned
+// entirely by the UI, which gates it on user intent (a modal is open, or the
+// user dismissed the pane with ctrl+w) — state the manager has no view of. The
+// manager renders the input_required badge; the UI alone decides whether to
+// surface the pane. Pane.SetState fires its own repaint on a state change, so
+// the badge updates without a manager-level repaint here.
 func (m *Manager) SetStateByTask(taskID, state string) {
 	m.mu.Lock()
 	idx := m.indexOfTaskLocked(taskID)
@@ -256,22 +253,9 @@ func (m *Manager) SetStateByTask(taskID, state string) {
 		return
 	}
 	p := m.panes[idx]
-	// Focus-follows-input: surface a pane that just paused on a permission
-	// dialog by giving it focus, the in-TUI dual of the [[T-034]] notification
-	// click. Idempotent (only when focus is elsewhere) and never steals focus
-	// onto a dead pane. The UI flips its own list/pane focus to match.
-	surfaced := false
-	if m.focusFollowsInput && state == StateInputRequired && !p.IsDead() && m.focusID != p.id {
-		m.focusID = p.id
-		surfaced = true
-	}
 	m.mu.Unlock()
 
 	p.SetState(state)
-	if surfaced {
-		debugf("manager: focus-follows-input surfaced %s (task %s)", p.id, taskID)
-		m.requestRepaint()
-	}
 }
 
 // CanSpawn reports whether the current region admits one more pane under the
@@ -332,6 +316,17 @@ func (m *Manager) Focused() *Pane {
 	return m.panes[idx]
 }
 
+// FocusedTaskID returns the task id of the focused pane, or "" if none is
+// focused. It is the consumer-facing projection of Focused() the UI uses to
+// record which pane the user dismissed with ctrl+w (T-048), without coupling the
+// UI's paneManager interface to the concrete *Pane type.
+func (m *Manager) FocusedTaskID() string {
+	if p := m.Focused(); p != nil {
+		return p.TaskID()
+	}
+	return ""
+}
+
 // SetStrategy swaps the active layout strategy and re-tiles. It is the runtime
 // half of the T-037 Open/Closed seam: the cycle-layout keybinding switches
 // columns→stack→tabs→responsive without the Manager knowing the concrete types.
@@ -346,13 +341,6 @@ func (m *Manager) SetStrategy(s Strategy) {
 	m.mu.Unlock()
 	debugf("manager: layout strategy set")
 	m.requestRepaint()
-}
-
-// SetFocusFollowsInput toggles the focus-follows-input behaviour at runtime.
-func (m *Manager) SetFocusFollowsInput(on bool) {
-	m.mu.Lock()
-	m.focusFollowsInput = on
-	m.mu.Unlock()
 }
 
 // ToggleCollapse flips whether the pane with id renders as a thin strip, then

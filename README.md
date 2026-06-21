@@ -290,6 +290,14 @@ enters `input_required` auto-surfaces in the TUI — the in-TUI dual of the
 idempotent with it. Set it `false` to keep focus where it is and only paint the
 emphasized (animated) `input_required` badge, which agrees with the list badge.
 
+Pressing `ctrl+w` to return to the list while a pane is still waiting for input
+*dismisses* that standing prompt: focus stays on the list across subsequent
+status ticks so you can navigate and spawn more tasks uninterrupted. The pane
+keeps its animated `input_required` badge, and surfacing re-arms automatically —
+the next *genuinely new* prompt (after the agent makes progress) surfaces again.
+A modal/form/filter/detail view open in the list likewise suppresses surfacing
+so a background pane never yanks focus mid-interaction.
+
 ```bash
 squash-ide --engine native --layout responsive --focus-follows-input true
 ```

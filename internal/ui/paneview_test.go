@@ -27,6 +27,7 @@ type stubManager struct {
 	spawnErr    error // when set, Spawn returns it (exercises the rollback path)
 	closedTasks []string
 	focusedTask string
+	focusErr    error             // when set, FocusByTask returns it (pane died between tick and focus)
 	states      map[string]string // taskID -> last state set
 	canSpawn    bool
 
@@ -71,9 +72,14 @@ func (s *stubManager) CloseByTask(taskID string) error {
 }
 
 func (s *stubManager) FocusByTask(taskID string) error {
+	if s.focusErr != nil {
+		return s.focusErr
+	}
 	s.focusedTask = taskID
 	return nil
 }
+
+func (s *stubManager) FocusedTaskID() string { return s.focusedTask }
 
 func (s *stubManager) SetStateByTask(taskID, state string) { s.states[taskID] = state }
 
@@ -394,5 +400,162 @@ func TestNativePaneOutputMsg_RearmsListener(t *testing.T) {
 	_, cmd := m.Update(paneOutputMsg{})
 	if cmd == nil {
 		t.Fatal("paneOutputMsg should return a command to re-arm the listener")
+	}
+}
+
+// --- T-048: focus-follows-input respects user intent ---
+
+// tickStatusInput drives one status tick reporting `state` for taskID through
+// the model (an empty state sends a tick with no entry for the task, exercising
+// the synthesised-idle path). Returns the updated Model.
+func tickStatusInput(t *testing.T, m Model, taskID, state string) Model {
+	t.Helper()
+	statuses := map[string]status.File{}
+	if state != "" {
+		statuses[taskID] = status.File{TaskID: taskID, State: state}
+	}
+	out, _ := m.Update(statusTickMsg{statuses: statuses})
+	return out.(Model)
+}
+
+// ctrlW drives a ctrl+w keypress through the model.
+func ctrlW(t *testing.T, m Model) Model {
+	t.Helper()
+	out, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlW})
+	return out.(Model)
+}
+
+// Core regression (T-048): once the user presses ctrl+w to return to the list,
+// the same standing prompt must not yank focus back — not on a continuous pause,
+// and not across a transient status gap that synthesises a fresh edge.
+func TestFocusFollowsInput_DismissedPaneStaysOnList(t *testing.T) {
+	mgr := newStubManager()
+	m := nativeModel(t, mgr)
+
+	// First prompt surfaces the pane (preserves the T-040 happy path).
+	m = tickStatusInput(t, m, "T-003", pane.StateInputRequired)
+	if !m.paneFocused || mgr.focusedTask != "T-003" {
+		t.Fatalf("first input_required should surface T-003: paneFocused=%v focused=%q", m.paneFocused, mgr.focusedTask)
+	}
+
+	// User deliberately returns to the list.
+	m = ctrlW(t, m)
+	if m.paneFocused {
+		t.Fatal("ctrl+w should return focus to the list")
+	}
+	if !m.dismissedFocus["T-003"] {
+		t.Fatal("ctrl+w should record T-003 as dismissed")
+	}
+	mgr.focusedTask = "" // observe any subsequent FocusByTask
+
+	// Continuous pause across a tick: edge gate alone holds focus on the list.
+	m = tickStatusInput(t, m, "T-003", pane.StateInputRequired)
+	// Status flap: entry briefly absent (synthesised idle) then input_required
+	// again — a fresh working->input_required edge that dismissal must suppress.
+	m = tickStatusInput(t, m, "", "")
+	m = tickStatusInput(t, m, "T-003", pane.StateInputRequired)
+
+	if m.paneFocused {
+		t.Error("dismissed pane must not re-grab the UI focus across ticks")
+	}
+	if mgr.focusedTask != "" {
+		t.Errorf("dismissed pane must not be re-focused, got %q", mgr.focusedTask)
+	}
+	if !m.dismissedFocus["T-003"] {
+		t.Error("a synthesised-idle flap must not clear the dismissal")
+	}
+}
+
+// Re-arm (T-048): dismissal suppresses only the standing prompt the user left.
+// Once the pane makes genuine progress out of input_required, the next, truly
+// new prompt surfaces again.
+func TestFocusFollowsInput_ReArmsAfterProgress(t *testing.T) {
+	mgr := newStubManager()
+	m := nativeModel(t, mgr)
+
+	m = tickStatusInput(t, m, "T-003", pane.StateInputRequired)
+	m = ctrlW(t, m)
+	if !m.dismissedFocus["T-003"] {
+		t.Fatal("precondition: T-003 should be dismissed after ctrl+w")
+	}
+	mgr.focusedTask = ""
+
+	// Genuine progress (a real new report) clears the dismissal.
+	m = tickStatusInput(t, m, "T-003", pane.StateWorking)
+	if m.dismissedFocus["T-003"] {
+		t.Error("progress out of input_required should re-arm (clear dismissal)")
+	}
+	if m.paneFocused {
+		t.Error("a working report should not surface the pane")
+	}
+
+	// The next, genuinely new prompt surfaces again on its edge.
+	m = tickStatusInput(t, m, "T-003", pane.StateInputRequired)
+	if !m.paneFocused || mgr.focusedTask != "T-003" {
+		t.Errorf("re-armed prompt should surface: paneFocused=%v focused=%q", m.paneFocused, mgr.focusedTask)
+	}
+}
+
+// Modal guard (T-048): a background pane entering input_required must not pull
+// focus out from under a user mid-interaction. The badge still updates so the
+// pane visibly shows it needs input.
+func TestFocusFollowsInput_SuppressedWhileModal(t *testing.T) {
+	form := newNewTaskForm()
+	cases := []struct {
+		name  string
+		setup func(*Model)
+	}{
+		{"new-task form", func(m *Model) { m.creatingTask = &form }},
+		{"spawn confirm", func(m *Model) { m.confirming = &task.Task{ID: "T-001"} }},
+		{"filter active", func(m *Model) { m.filterActive = true }},
+		{"detail view", func(m *Model) { m.view = detailView }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr := newStubManager()
+			m := nativeModel(t, mgr)
+			tc.setup(&m)
+
+			m = tickStatusInput(t, m, "T-003", pane.StateInputRequired)
+
+			if m.paneFocused {
+				t.Error("focus-follows-input must not steal focus while a modal owns the keyboard")
+			}
+			if mgr.focusedTask != "" {
+				t.Errorf("no FocusByTask expected while a modal is open, got %q", mgr.focusedTask)
+			}
+			if mgr.states["T-003"] != pane.StateInputRequired {
+				t.Errorf("badge state = %q, want input_required (badge must still update)", mgr.states["T-003"])
+			}
+		})
+	}
+}
+
+// Exception (T-048): ctrl+w with no focused pane records no dismissal and does
+// not panic; pane focus still clears.
+func TestFocusDismiss_NoFocusedPaneNoPanic(t *testing.T) {
+	mgr := newStubManager() // focusedTask "" => FocusedTaskID() == ""
+	m := nativeModel(t, mgr)
+	m.paneFocused = true
+
+	m = ctrlW(t, m)
+	if m.paneFocused {
+		t.Error("ctrl+w should still clear pane focus")
+	}
+	if len(m.dismissedFocus) != 0 {
+		t.Errorf("no dismissal expected with no focused pane, got %v", m.dismissedFocus)
+	}
+}
+
+// Exception (T-048): if the pane died between the tick and the focus call,
+// FocusByTask returns ErrUnknownPane and the UI must leave focus unchanged.
+func TestFocusFollowsInput_FocusByTaskErrLeavesFocus(t *testing.T) {
+	mgr := newStubManager()
+	mgr.focusErr = pane.ErrUnknownPane
+	m := nativeModel(t, mgr)
+
+	m = tickStatusInput(t, m, "T-003", pane.StateInputRequired)
+	if m.paneFocused {
+		t.Error("a FocusByTask error must leave the UI focus on the list")
 	}
 }
