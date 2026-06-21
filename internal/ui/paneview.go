@@ -55,6 +55,24 @@ type paneManager interface {
 	ToggleCollapseFocused()
 	// Tick advances the input_required badge-blink phase.
 	Tick()
+
+	// T-050 modal popover surface — a single floating pane composited over the
+	// tiled region for the native /log-task session.
+
+	// SpawnModal starts spec.Command in the floating modal slot sized to box.
+	SpawnModal(spec pane.SpawnSpec, box pane.Rect) (*pane.Pane, error)
+	// ModalPane returns the open modal pane (nil if none) for the overlay render.
+	ModalPane() *pane.Pane
+	// HasModal reports whether a modal popover is open.
+	HasModal() bool
+	// WriteToModal forwards raw input bytes to the modal's child (no-op if none).
+	WriteToModal(b []byte) (int, error)
+	// ModalDone returns the modal child's exit channel (nil if no modal).
+	ModalDone() <-chan struct{}
+	// ResizeModal best-effort resizes the modal child to a new box geometry.
+	ResizeModal(box pane.Rect)
+	// CloseModal terminates + clears the modal (idempotent no-op if none).
+	CloseModal() error
 }
 
 // paneGutter is the blank-column separator between the task list and the
@@ -122,7 +140,65 @@ func (m Model) nativeView() string {
 	}
 
 	gap := lipgloss.NewStyle().Width(paneGutter).Render("")
-	return lipgloss.JoinHorizontal(lipgloss.Top, left, gap, right)
+	joined := lipgloss.JoinHorizontal(lipgloss.Top, left, gap, right)
+
+	// T-050: the /log-task popover is composited *over* the joined view so the
+	// spawned panes stay visible behind it — unlike the takeover the tmux engine
+	// still uses. Only engages while a modal is open.
+	if m.manager.HasModal() {
+		if mp := m.manager.ModalPane(); mp != nil {
+			box := m.popoverBox()
+			over := mp.Render(box.W, box.H, true, false)
+			joined = placeOverlay(box.X, box.Y, over, joined)
+		}
+	}
+	return joined
+}
+
+// maxPopoverWidth / maxPopoverHeight cap the /log-task popover so it never grows
+// to the full terminal on a large screen — it should read as a centered modal
+// with the spawned panes framing it. Below the cap it tracks the terminal at
+// ~90%/80% (see popoverBox).
+const (
+	maxPopoverWidth  = 100
+	maxPopoverHeight = 40
+)
+
+// popoverBox computes the centered bounding box (border included) for the
+// /log-task popover: ~90% of the terminal width and ~80% of its height, each
+// capped, and never larger than the terminal. The same box drives both the PTY
+// child's interior size (SpawnModal/ResizeModal) and the overlay position, so
+// they always agree.
+func (m Model) popoverBox() pane.Rect {
+	w := m.width * 9 / 10
+	if w > maxPopoverWidth {
+		w = maxPopoverWidth
+	}
+	if w > m.width {
+		w = m.width
+	}
+	if w < 1 {
+		w = 1
+	}
+	h := m.height * 8 / 10
+	if h > maxPopoverHeight {
+		h = maxPopoverHeight
+	}
+	if h > m.height {
+		h = m.height
+	}
+	if h < 1 {
+		h = 1
+	}
+	x := (m.width - w) / 2
+	if x < 0 {
+		x = 0
+	}
+	y := (m.height - h) / 2
+	if y < 0 {
+		y = 0
+	}
+	return pane.Rect{X: x, Y: y, W: w, H: h}
 }
 
 // nativeTooNarrowView renders the full-screen "terminal too narrow" overlay for

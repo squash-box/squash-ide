@@ -160,6 +160,12 @@ func (p *Pane) State() string {
 	return p.state
 }
 
+// Done returns the channel readLoop closes when the child's PTY EOFs (the child
+// exited). The native modal popover (T-050) blocks on it to learn when the
+// /log-task claude session finished, without polling or new lifecycle
+// machinery — it surfaces the channel readLoop already owns.
+func (p *Pane) Done() <-chan struct{} { return p.done }
+
 // IsDead reports whether the child has exited (or the pane was closed).
 func (p *Pane) IsDead() bool {
 	p.mu.Lock()
