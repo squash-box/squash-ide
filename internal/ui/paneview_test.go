@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/squashbox/squash-ide/internal/config"
 	"github.com/squashbox/squash-ide/internal/pane"
+	"github.com/squashbox/squash-ide/internal/procstat"
 	"github.com/squashbox/squash-ide/internal/status"
 	"github.com/squashbox/squash-ide/internal/task"
 )
@@ -33,6 +34,10 @@ type stubManager struct {
 	focusErr    error             // when set, FocusByTask returns it (pane died between tick and focus)
 	states      map[string]string // taskID -> last state set
 	canSpawn    bool
+
+	// T-055 resource-readout recording.
+	pids     map[string]int         // returned by PIDsByTask
+	statsSet map[string]statsRecord // taskID -> last stats set via SetStatsByTask
 
 	// T-051 mouse hit-test scripting: when set, TaskAtPoint delegates to it so a
 	// test can map a synthetic (x, y) to a chosen task id (or a miss). Nil => miss.
@@ -116,6 +121,23 @@ func (s *stubManager) TaskAtPoint(x, y int) (string, bool) {
 func (s *stubManager) SetStateByTask(taskID, state string) { s.states[taskID] = state }
 
 func (s *stubManager) CanSpawn() bool { return s.canSpawn }
+
+// statsRecord captures one SetStatsByTask call for assertions.
+type statsRecord struct {
+	cpuPct   float64
+	cpuValid bool
+	memBytes uint64
+	ok       bool
+}
+
+func (s *stubManager) PIDsByTask() map[string]int { return s.pids }
+
+func (s *stubManager) SetStatsByTask(taskID string, cpuPct float64, cpuValid bool, memBytes uint64, ok bool) {
+	if s.statsSet == nil {
+		s.statsSet = map[string]statsRecord{}
+	}
+	s.statsSet[taskID] = statsRecord{cpuPct: cpuPct, cpuValid: cpuValid, memBytes: memBytes, ok: ok}
+}
 
 func (s *stubManager) SetStrategy(st pane.Strategy) { s.strategy = st }
 func (s *stubManager) FocusNext()                   { s.focusNextCount++ }
@@ -346,56 +368,107 @@ func TestNativeView_TooNarrow(t *testing.T) {
 	}
 }
 
-// T-052: in the compaction band (61 <= width < 101) the native list collapses to
-// CompactListWidth and the manager gets the recovered columns, instead of the
-// too-narrow overlay that pre-T-052 fired for everything under 101.
-func TestNativeView_CompactsInBand(t *testing.T) {
+// nativeListWidth scales the list between CompactListWidth (floor) and tuiWidth
+// (ceiling), reserving paneGutter+nativeMinPaneWidth for the panes. This
+// supersedes the binary T-052 collapse: the list no longer snaps from full to
+// compact, it tracks the terminal across the band.
+func TestNativeListWidth_TruthTable(t *testing.T) {
+	mgr := newStubManager()
+	cases := []struct {
+		name  string
+		width int
+		want  int
+	}{
+		{"wide — parked at ceiling", 200, 60},
+		{"boundary 101 — still ceiling", 101, 60},
+		{"just inside band — one below ceiling", 100, 59},
+		{"mid band", 90, 49},
+		{"panes hit their floor", 81, 40},
+		{"one narrower — list dips below 40", 80, 39},
+		{"compact floor (61) — list at minimum", 61, 20},
+		{"below floor — clamped to minimum", 60, 20},
+		{"width zero — startup, report full width", 0, 60},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := nativeModel(t, mgr)
+			m.width = tc.width
+			if got := m.nativeListWidth(); got != tc.want {
+				t.Errorf("nativeListWidth(width=%d) = %d, want %d", tc.width, got, tc.want)
+			}
+		})
+	}
+}
+
+// In the responsive band the list takes its scaled width and the manager gets
+// exactly the columns the list leaves behind — region X/W track nativeListWidth,
+// never the old fixed CompactListWidth reservation.
+func TestNativeView_ResponsiveRegion(t *testing.T) {
 	mgr := newStubManager()
 	mgr.renderOut = "PANE-REGION-SENTINEL"
 	m := nativeModel(t, mgr)
 	m.width = 90 // between the compact floor (61) and the full-list floor (101)
 
-	if !m.nativeListCompact() {
-		t.Fatal("nativeListCompact() should be true at width=90")
+	listW := m.nativeListWidth()
+	if listW != 49 {
+		t.Fatalf("nativeListWidth() = %d at width=90, want 49", listW)
 	}
 
-	// rightRegion now reflects the compact list: W == 90-20-1, X == 21.
 	rr := m.rightRegion()
-	if rr.W != 90-CompactListWidth-paneGutter {
-		t.Errorf("rightRegion().W = %d, want %d", rr.W, 90-CompactListWidth-paneGutter)
+	if rr.X != listW+paneGutter {
+		t.Errorf("rightRegion().X = %d, want %d", rr.X, listW+paneGutter)
 	}
-	if rr.X != CompactListWidth+paneGutter {
-		t.Errorf("rightRegion().X = %d, want %d", rr.X, CompactListWidth+paneGutter)
+	if rr.W != 90-listW-paneGutter {
+		t.Errorf("rightRegion().W = %d, want %d", rr.W, 90-listW-paneGutter)
 	}
 
 	// The view composes the list + pane region (sentinel present), not the overlay.
 	view := m.View()
 	if strings.Contains(view, "too narrow") {
-		t.Error("compaction band should not render the too-narrow overlay")
+		t.Error("responsive band should not render the too-narrow overlay")
 	}
 	if !strings.Contains(view, "PANE-REGION-SENTINEL") {
-		t.Error("compaction band should render the manager's pane region")
+		t.Error("responsive band should render the manager's pane region")
 	}
 }
 
-// T-052: the native list renders at CompactListWidth (compact top bar + cards)
-// when nativeListCompact() is true — every line within the 20-col budget.
-func TestNativeListViewRender_CompactInBand(t *testing.T) {
+// Above width 80 the scaled list clears 40 cols, so it renders the full-width
+// chrome (not the compact stub) — every line within the scaled width budget.
+func TestNativeListViewRender_FullChromeInBand(t *testing.T) {
 	mgr := newStubManager()
 	m := nativeModel(t, mgr)
 	m.width = 90
-	if !m.nativeListCompact() {
-		t.Fatal("precondition: should be compact at width=90")
+	listW := m.nativeListWidth() // 49 — above the 40-col compact-chrome threshold
+
+	out := m.listViewRender()
+	for i, line := range strings.Split(out, "\n") {
+		if w := lipgloss.Width(line); w > listW {
+			t.Errorf("native list line %d width %d exceeds scaled width %d: %q",
+				i, w, listW, line)
+		}
+	}
+}
+
+// Once the scaled list drops below 40 cols (terminal in the lower band) the
+// chrome switches to its compact layout: the 'sq' stub appears and every line
+// fits the scaled width.
+func TestNativeListViewRender_CompactChromeWhenNarrow(t *testing.T) {
+	mgr := newStubManager()
+	m := nativeModel(t, mgr)
+	m.width = 70 // list = 70-1-40 = 29, below the compact-chrome threshold
+	listW := m.nativeListWidth()
+	if listW != 29 {
+		t.Fatalf("nativeListWidth() = %d at width=70, want 29", listW)
 	}
 
 	out := m.listViewRender()
 	if !strings.Contains(out, "sq") {
-		t.Errorf("expected compact top bar stub 'sq' in native compact list: %q", out)
+		t.Errorf("expected compact top bar stub 'sq' in narrow native list: %q", out)
 	}
 	for i, line := range strings.Split(out, "\n") {
-		if w := lipgloss.Width(line); w > CompactListWidth {
-			t.Errorf("native compact list line %d width %d exceeds %d: %q",
-				i, w, CompactListWidth, line)
+		if w := lipgloss.Width(line); w > listW {
+			t.Errorf("narrow native list line %d width %d exceeds %d: %q",
+				i, w, listW, line)
 		}
 	}
 }
@@ -516,6 +589,72 @@ func TestNativePaneOutputMsg_RearmsListener(t *testing.T) {
 	_, cmd := m.Update(paneOutputMsg{})
 	if cmd == nil {
 		t.Fatal("paneOutputMsg should return a command to re-arm the listener")
+	}
+}
+
+// --- T-055: per-pane CPU/mem header readout ---
+
+// Native Init batches the 15s resource tick when pane_stats is enabled, and a
+// resourceTickMsg fans usage out to SetStatsByTask and re-arms.
+func TestNativeResourceTick_FansOutAndRearms(t *testing.T) {
+	mgr := newStubManager()
+	m := nativeModel(t, mgr) // config.Defaults() -> PaneStats true
+
+	if m.statsCollector == nil {
+		t.Fatal("native model with pane_stats=true should build a stats collector")
+	}
+
+	msg := resourceTickMsg{usage: map[string]procstat.Usage{
+		"T-003": {CPUPercent: 3.2, CPUValid: true, RSSBytes: 145 << 20, OK: true},
+		"T-009": {OK: false},
+	}}
+	out, cmd := m.Update(msg)
+	_ = out.(Model)
+
+	rec, ok := mgr.statsSet["T-003"]
+	if !ok || !rec.ok || !rec.cpuValid || rec.cpuPct != 3.2 || rec.memBytes != 145<<20 {
+		t.Errorf("SetStatsByTask(T-003) = %+v, want cpu 3.2 valid mem 145M ok", rec)
+	}
+	failed := mgr.statsSet["T-009"]
+	if failed.ok {
+		t.Errorf("a failed sample should set ok=false for T-009, got %+v", failed)
+	}
+	if cmd == nil {
+		t.Error("resourceTickMsg should re-arm the resource tick")
+	}
+}
+
+// With pane_stats disabled, no collector is built, tickResources returns nil,
+// and a resourceTickMsg (should one arrive) drives no stats and no re-arm.
+func TestNativeResourceTick_DisabledNoCollector(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Engine = config.EngineNative
+	cfg.Vault = "/fake/vault"
+	cfg.PaneStats = false
+	m := New(cfg)
+	mgr := newStubManager()
+	m.manager = mgr
+	m.allTasks = testTasks()
+	m.width = 200
+	m.height = 50
+	m.buildItems()
+
+	if m.statsCollector != nil {
+		t.Fatal("pane_stats=false must not build a stats collector")
+	}
+	if m.tickResources() != nil {
+		t.Error("pane_stats=false: tickResources should return nil (never armed)")
+	}
+}
+
+// tmux mode never builds a stats collector (native-only feature).
+func TestTmuxModeNoStatsCollector(t *testing.T) {
+	m := New(config.Defaults()) // tmux engine
+	if m.statsCollector != nil {
+		t.Error("tmux engine must not build a stats collector")
+	}
+	if m.tickResources() != nil {
+		t.Error("tmux engine tickResources should be nil")
 	}
 }
 

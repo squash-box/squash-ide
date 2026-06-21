@@ -14,9 +14,10 @@ import (
 type layoutAxis int
 
 const (
-	axisColumns layoutAxis = iota // boxes side by side, full height (FlexColumns)
-	axisRows                      // boxes stacked, full width (StackRows)
-	axisTabbed                    // one pane + a tab strip (Tabs)
+	axisColumns   layoutAxis = iota // boxes side by side, full height (FlexColumns)
+	axisRows                        // boxes stacked, full width (StackRows)
+	axisTabbed                      // one pane + a tab strip (Tabs)
+	axisMainStack                   // one full-height main box beside a stacked column (MainStack)
 )
 
 // fixedAxis is the optional capability a Strategy implements when it composes
@@ -42,9 +43,9 @@ const (
 // (FlexColumns) composes as columns. Adding a new strategy touches only this
 // resolver and never the Manager's spawn/close/render lifecycle — the Open/
 // Closed payoff of the T-037 seam.
-func resolveStrategy(s Strategy, region Rect, n int, c Constraints) (Strategy, layoutAxis) {
+func resolveStrategy(s Strategy, region Rect, n int, c Constraints, nCollapsed int) (Strategy, layoutAxis) {
 	if r, ok := s.(Responsive); ok {
-		return r.resolve(region, n, c)
+		return r.resolve(region, n, c, nCollapsed)
 	}
 	if fa, ok := s.(fixedAxis); ok {
 		return s, fa.axis()
@@ -63,14 +64,18 @@ func computeRects(s Strategy, region Rect, panes []*Pane, collapsed map[string]b
 	if n == 0 {
 		return nil, axisColumns, nil
 	}
-	concrete, axis := resolveStrategy(s, region, n, c)
+	nCollapsed := countCollapsed(panes, collapsed)
+	concrete, axis := resolveStrategy(s, region, n, c, nCollapsed)
 
-	if axis == axisTabbed {
+	// Tabbed (one visible pane) and main+stack (a 2-D layout) own their full
+	// geometry; the collapse-strip reflow below only models a single axis.
+	// Responsive never resolves to axisMainStack while anything is collapsed, so
+	// the strip path only ever sees columns/rows.
+	if axis == axisTabbed || axis == axisMainStack {
 		rects, err := concrete.Arrange(region, n, c)
 		return rects, axis, err
 	}
 
-	nCollapsed := countCollapsed(panes, collapsed)
 	if nCollapsed == 0 {
 		rects, err := concrete.Arrange(region, n, c)
 		return rects, axis, err
@@ -175,6 +180,34 @@ func composeLinear(axis layoutAxis, panes []*Pane, rects []Rect, collapsed map[s
 		return lipgloss.JoinVertical(lipgloss.Left, parts...)
 	}
 	return lipgloss.JoinHorizontal(lipgloss.Top, parts...)
+}
+
+// composeMainStack stitches a MainStack layout: the first pane rendered
+// full-height on the left, the rest stacked in a right-hand column. The leading
+// gutter column (before the main box and before the side column) and the
+// leading gutter row before each side pane mirror composeLinear's columns/rows
+// gutters, so the rendered offsets line up with MainStack.Arrange's rects (and
+// thus the Manager's positional hit-test). Collapsed panes never reach here —
+// Responsive declines axisMainStack while anything is collapsed.
+func composeMainStack(panes []*Pane, rects []Rect, focusID string, gutter int, blink bool) string {
+	if len(panes) == 0 || len(rects) == 0 {
+		return ""
+	}
+	main := panes[0]
+	mainBox := main.Render(rects[0].W, rects[0].H, main.id == focusID, blink)
+
+	parts := make([]string, 0, (len(panes)-1)*(gutter+1))
+	for i := 1; i < len(panes) && i < len(rects); i++ {
+		p := panes[i]
+		for g := 0; g < gutter; g++ {
+			parts = append(parts, "") // a leading blank row before each side pane
+		}
+		parts = append(parts, p.Render(rects[i].W, rects[i].H, p.id == focusID, blink))
+	}
+	side := lipgloss.JoinVertical(lipgloss.Left, parts...)
+
+	gap := strings.Repeat(" ", gutter)
+	return lipgloss.JoinHorizontal(lipgloss.Top, gap, mainBox, gap, side)
 }
 
 // composeTabs renders a tabbed layout: a tab strip listing every pane above the

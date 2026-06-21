@@ -264,6 +264,47 @@ func (m *Manager) SetStateByTask(taskID, state string) {
 	p.SetState(state)
 }
 
+// SetStatsByTask updates the CPU/memory readout of the pane running taskID
+// (T-055), driving the right-floated header stats. It mirrors SetStateByTask:
+// locate the pane under m.mu, release, then mutate the pane (Pane.SetStats
+// fires its own repaint on a change). Unknown task id is a silent no-op; a dead
+// pane ignores the write (Pane.SetStats freezes once dead), so an exited pane's
+// last reading stays frozen with its EXITED badge.
+func (m *Manager) SetStatsByTask(taskID string, cpuPct float64, cpuValid bool, memBytes uint64, ok bool) {
+	m.mu.Lock()
+	idx := m.indexOfTaskLocked(taskID)
+	if idx < 0 {
+		m.mu.Unlock()
+		return
+	}
+	p := m.panes[idx]
+	m.mu.Unlock()
+
+	p.SetStats(cpuPct, cpuValid, memBytes, ok)
+}
+
+// PIDsByTask maps each live, task-bound pane's task id to its child PID, for the
+// UI's resource sampler (T-055). It skips dead panes (their child has exited —
+// no group to sample) and any pane whose Process reports a non-positive PID
+// (proc nil / not started). The modal popover is excluded by construction: it
+// lives in m.modal, not m.panes (T-050).
+func (m *Manager) PIDsByTask() map[string]int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make(map[string]int, len(m.panes))
+	for _, p := range m.panes {
+		if p.taskID == "" || p.IsDead() {
+			continue
+		}
+		pid := p.proc.Pid()
+		if pid <= 0 {
+			continue
+		}
+		out[p.taskID] = pid
+	}
+	return out
+}
+
 // CanSpawn reports whether the current region admits one more pane under the
 // active Strategy/Constraints. The TUI calls it as a pre-flight before touching
 // the vault, the native analogue of dispatch's tmux width check — so a spawn
@@ -278,13 +319,15 @@ func (m *Manager) CanSpawn() bool {
 		return true
 	}
 	n := len(m.panes) + 1
-	concrete, axis := resolveStrategy(m.strategy, region, n, m.constraints)
+	// The prospective pane spawns expanded; existing collapsed panes stay strips.
+	nCollapsed := countCollapsed(m.panes, m.collapsed)
+	concrete, axis := resolveStrategy(m.strategy, region, n, m.constraints, nCollapsed)
 	if axis == axisTabbed {
 		_, err := concrete.Arrange(region, n, m.constraints)
 		return err == nil
 	}
-	// The prospective pane spawns expanded; existing collapsed panes stay strips.
-	nCollapsed := countCollapsed(m.panes, m.collapsed)
+	// axisMainStack only resolves when nCollapsed == 0, so reduceRegion is a
+	// no-op there and this fits the whole region — the same call columns/rows use.
 	_, err := concrete.Arrange(reduceRegion(region, nCollapsed, axis, m.constraints), n-nCollapsed, m.constraints)
 	return err == nil
 }
@@ -550,6 +593,9 @@ func (m *Manager) Render(region Rect) string {
 	}
 	if axis == axisTabbed {
 		return composeTabs(region, panes, rects, focusID, blink)
+	}
+	if axis == axisMainStack {
+		return composeMainStack(panes, rects, focusID, gutter, blink)
 	}
 	return composeLinear(axis, panes, rects, collapsed, focusID, gutter, blink)
 }

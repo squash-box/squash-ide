@@ -36,6 +36,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/vt"
+	"github.com/squashbox/squash-ide/internal/procstat"
 )
 
 // Pane states. These reuse the exact strings internal/status writes and
@@ -82,6 +83,16 @@ type Pane struct {
 	state  string
 	dead   bool
 	closed bool
+
+	// Resource readout for the header (T-055), refreshed by SetStats from the
+	// UI's 15s tick. Guarded by mu alongside state because Render snapshots them
+	// in the same critical section. cpuValid is false until the collector has two
+	// samples to diff (header shows "—" for cpu); statsOK is false when the pid
+	// couldn't be sampled at all (header shows no stats — the pre-T-055 look).
+	cpuPct        float64
+	memBytes      uint64
+	statsCPUValid bool
+	statsOK       bool
 
 	setsize   func(rows, cols uint16) error // window-size ioctl via the manager's seam
 	notify    func()                        // repaint hook, invoked on output and state change
@@ -191,6 +202,39 @@ func (p *Pane) SetState(state string) {
 	}
 }
 
+// SetStats updates the pane's CPU/memory readout (T-055) and requests a repaint
+// only when something the header shows actually changed. Like SetState it
+// freezes once the pane is dead — an exited pane keeps its last reading rather
+// than being resurrected by a late tick (the [[T-035]] remain-on-exit
+// invariant). cpuValid=false renders "—" for cpu; ok=false drops the whole stats
+// segment from the header.
+func (p *Pane) SetStats(cpuPct float64, cpuValid bool, memBytes uint64, ok bool) {
+	p.mu.Lock()
+	if p.dead {
+		p.mu.Unlock()
+		return
+	}
+	changed := p.cpuPct != cpuPct || p.statsCPUValid != cpuValid ||
+		p.memBytes != memBytes || p.statsOK != ok
+	p.cpuPct = cpuPct
+	p.statsCPUValid = cpuValid
+	p.memBytes = memBytes
+	p.statsOK = ok
+	p.mu.Unlock()
+	if changed {
+		p.notify()
+	}
+}
+
+// statsSnapshot is the header's view of a pane's resource readout, snapshotted
+// under mu by Render and handed to headerLine.
+type statsSnapshot struct {
+	cpuPct   float64
+	cpuValid bool
+	memBytes uint64
+	ok       bool
+}
+
 // Write sends raw bytes (typically from EncodeKey) to the child's PTY master.
 // It returns an error on a closed pane rather than panicking on a nil/closed
 // file.
@@ -245,9 +289,10 @@ func (p *Pane) Render(width, height int, focused, blink bool) string {
 	p.mu.Lock()
 	grid := p.emu.Render()
 	state := p.state
+	stats := statsSnapshot{cpuPct: p.cpuPct, cpuValid: p.statsCPUValid, memBytes: p.memBytes, ok: p.statsOK}
 	p.mu.Unlock()
 
-	header := p.headerLine(state, cols, blink)
+	header := p.headerLine(state, cols, blink, stats)
 	content := lipgloss.JoinVertical(lipgloss.Left, header, grid)
 
 	return lipgloss.NewStyle().
@@ -309,23 +354,52 @@ func (p *Pane) RenderStrip(width, height int, axis layoutAxis, focused, blink bo
 		Render(content)
 }
 
-// headerLine renders the status badge + task id + title, the painted lipgloss
-// analogue of spawner.TaskBorderFormatWithState. width is the interior width to
-// fit within; blink animates the input_required badge.
-func (p *Pane) headerLine(state string, width int, blink bool) string {
+// headerLine renders the status badge + task id + title on the left and, when
+// stats are available and the pane is wide enough, a CPU%/mem readout floated
+// hard against the right edge (T-055) — the painted lipgloss analogue of
+// spawner.TaskBorderFormatWithState. width is the interior width to fit within;
+// blink animates the input_required badge.
+//
+// Under width pressure the stats yield before the task identity: the badge is
+// never dropped, and if the left segment plus a two-cell gap plus the stats
+// won't fit, the stats are dropped and the left segment falls back to today's
+// MaxWidth truncation — so a narrow pane stays legible and never overflows.
+// Widths are measured with lipgloss.Width so the embedded ANSI styling doesn't
+// throw the arithmetic off.
+func (p *Pane) headerLine(state string, width int, blink bool, stats statsSnapshot) string {
 	title := p.title
 	if len(title) > 30 {
 		title = title[:27] + "..."
 	}
 	badge := stateBadge(state, blink)
-	line := badge
+	left := badge
 	if p.taskID != "" {
-		line += " " + headerMetaStyle.Render(p.taskID)
+		left += " " + headerMetaStyle.Render(p.taskID)
 	}
 	if title != "" {
-		line += " " + headerTitleStyle.Render(title)
+		left += " " + headerTitleStyle.Render(title)
 	}
-	return lipgloss.NewStyle().MaxWidth(width).Render(line)
+
+	if stats.ok {
+		right := headerStatsStyle.Render(statsText(stats))
+		leftW, rightW := lipgloss.Width(left), lipgloss.Width(right)
+		if leftW+2+rightW <= width {
+			pad := lipgloss.NewStyle().Width(width - leftW - rightW).Render("")
+			return left + pad + right
+		}
+	}
+	return lipgloss.NewStyle().MaxWidth(width).Render(left)
+}
+
+// statsText formats the right-floated readout, e.g. "3.2%  145M". CPU shows "—"
+// until the collector has two samples to diff (cpuValid false); mem always
+// shows once stats are ok.
+func statsText(s statsSnapshot) string {
+	cpu := "—"
+	if s.cpuValid {
+		cpu = fmt.Sprintf("%.1f%%", s.cpuPct)
+	}
+	return cpu + "  " + procstat.FormatMem(s.memBytes)
 }
 
 // readLoop pumps the PTY master into the emulator until EOF/error, then marks
@@ -470,6 +544,11 @@ var (
 
 	headerMetaStyle  = lipgloss.NewStyle().Bold(true)
 	headerTitleStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+
+	// headerStatsStyle paints the right-floated CPU/mem readout (T-055). Dim
+	// grey, no background — quieter than the status badge so the eye still lands
+	// on the badge first; it is a glanceable monitor, not an alert.
+	headerStatsStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 
 	// Tab-strip chips (Tabs layout). The active tab and a pulsing input_required
 	// tab stand out from the dim inactive ones.

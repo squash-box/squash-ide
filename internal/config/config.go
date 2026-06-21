@@ -104,9 +104,14 @@ type Config struct {
 	// input_required (the in-TUI dual of the [[T-034]] notification click).
 	// Ignored under engine: tmux.
 	FocusFollowsInput bool `yaml:"focus_follows_input"`
+	// PaneStats, when true (the default), shows a per-pane CPU%/memory readout
+	// floated to the right of each native pane header, refreshed every 15s
+	// (T-055). The figure is currently Linux-only (read from /proc); off Linux
+	// the readout is a silent no-op. Ignored under engine: tmux.
+	PaneStats bool `yaml:"pane_stats"`
 
 	// Sources records the provenance of each resolved field.
-	// Keys: "vault", "engine", "layout", "focus_follows_input",
+	// Keys: "vault", "engine", "layout", "focus_follows_input", "pane_stats",
 	// "progress.show", "progress.poll_ci",
 	// "terminal.command", "terminal.args", "spawn.command", "spawn.args",
 	// "tmux.enabled", "tmux.session_name", "tmux.tui_width", "tmux.min_pane_width".
@@ -129,6 +134,10 @@ type Overrides struct {
 	// default wins), non-nil = forced to the pointed-at value.
 	FocusFollowsInput *bool
 
+	// PaneStats is the same tri-state flag for the header CPU/mem readout
+	// (T-055): nil = not provided, non-nil = forced.
+	PaneStats *bool
+
 	// Tmux flag overrides. --no-tmux is presence-only: true forces tmux off,
 	// absence (false) is a no-op (config/env still wins).
 	NoTmux       bool
@@ -149,6 +158,7 @@ func Defaults() Config {
 		Engine:            EngineTmux,
 		Layout:            LayoutResponsive,
 		FocusFollowsInput: true,
+		PaneStats:         true,
 		Terminal: Terminal{
 			// Empty = auto-detect (preserves T-007's terminal detection).
 			Command: "",
@@ -174,6 +184,7 @@ func Defaults() Config {
 			"engine":              SourceDefault,
 			"layout":              SourceDefault,
 			"focus_follows_input": SourceDefault,
+			"pane_stats":          SourceDefault,
 			"progress.show":       SourceDefault,
 			"progress.poll_ci":    SourceDefault,
 			"terminal.command":    SourceDefault,
@@ -293,6 +304,7 @@ type fileConfig struct {
 	Engine            string        `yaml:"engine"`
 	Layout            string        `yaml:"layout"`
 	FocusFollowsInput *bool         `yaml:"focus_follows_input"`
+	PaneStats         *bool         `yaml:"pane_stats"`
 	Terminal          Terminal      `yaml:"terminal"`
 	Spawn             Spawn         `yaml:"spawn"`
 	Tmux              *fileTmux     `yaml:"tmux"`
@@ -331,6 +343,10 @@ func applyFile(cfg *Config, path string) error {
 	if fc.FocusFollowsInput != nil {
 		cfg.FocusFollowsInput = *fc.FocusFollowsInput
 		cfg.Sources["focus_follows_input"] = SourceFile
+	}
+	if fc.PaneStats != nil {
+		cfg.PaneStats = *fc.PaneStats
+		cfg.Sources["pane_stats"] = SourceFile
 	}
 	if fc.Terminal.Command != "" {
 		cfg.Terminal.Command = fc.Terminal.Command
@@ -401,6 +417,10 @@ func applyEnv(cfg *Config) {
 		cfg.FocusFollowsInput = isTruthy(v)
 		cfg.Sources["focus_follows_input"] = SourceEnv
 	}
+	if v := os.Getenv("SQUASH_PANE_STATS"); v != "" {
+		cfg.PaneStats = isTruthy(v)
+		cfg.Sources["pane_stats"] = SourceEnv
+	}
 	if v := os.Getenv("SQUASH_PROGRESS_SHOW"); v != "" {
 		cfg.Progress.Show = isTruthy(v)
 		cfg.Sources["progress.show"] = SourceEnv
@@ -436,6 +456,10 @@ func applyOverrides(cfg *Config, ov Overrides) {
 	if ov.FocusFollowsInput != nil {
 		cfg.FocusFollowsInput = *ov.FocusFollowsInput
 		cfg.Sources["focus_follows_input"] = SourceFlag
+	}
+	if ov.PaneStats != nil {
+		cfg.PaneStats = *ov.PaneStats
+		cfg.Sources["pane_stats"] = SourceFlag
 	}
 	if ov.Terminal != "" {
 		cfg.Terminal.Command = ov.Terminal
@@ -499,6 +523,7 @@ func (c Config) Format() string {
 	fmt.Fprintf(&b, "engine: %s (from %s)\n", c.Engine, source(c, "engine"))
 	fmt.Fprintf(&b, "layout: %s (from %s)\n", c.Layout, source(c, "layout"))
 	fmt.Fprintf(&b, "focus_follows_input: %t (from %s)\n", c.FocusFollowsInput, source(c, "focus_follows_input"))
+	fmt.Fprintf(&b, "pane_stats: %t (from %s)\n", c.PaneStats, source(c, "pane_stats"))
 	fmt.Fprintf(&b, "terminal.command: %s (from %s)\n", terminalCommandDisplay(c), source(c, "terminal.command"))
 	fmt.Fprintf(&b, "terminal.args: %v (from %s)\n", c.Terminal.Args, source(c, "terminal.args"))
 	fmt.Fprintf(&b, "spawn.command: %s (from %s)\n", c.Spawn.Command, source(c, "spawn.command"))

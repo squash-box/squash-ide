@@ -46,6 +46,14 @@ type paneManager interface {
 	// CanSpawn reports whether the region admits one more pane (spawn pre-flight).
 	CanSpawn() bool
 
+	// T-055 resource-readout surface — the header CPU/mem monitor.
+
+	// PIDsByTask maps each live task-bound pane's task id to its child PID, for
+	// the resource sampler (skips dead / pid-less panes; excludes the modal).
+	PIDsByTask() map[string]int
+	// SetStatsByTask drives the pane's right-floated CPU/mem header readout.
+	SetStatsByTask(taskID string, cpuPct float64, cpuValid bool, memBytes uint64, ok bool)
+
 	// T-040 responsive-layout surface — runtime layout controls and the badge
 	// animation tick.
 
@@ -90,18 +98,12 @@ const paneGutter = 1
 const nativeMinPaneWidth = 40
 
 // rightRegion computes the bounding box the pane manager renders into: the
-// columns to the right of the fixed-width task list, less the gutter. Height
-// is the full terminal height. Mirrors the test-plan contract
-// (W == width - TUIWidth - gutter).
+// columns to the right of the (responsively sized) task list, less the gutter.
+// Height is the full terminal height. The manager always gets the columns the
+// list actually leaves behind — m.width - nativeListWidth() - gutter — so the
+// region tracks the list as it scales between its compact and full widths.
 func (m Model) rightRegion() pane.Rect {
-	tui := m.tuiWidth()
-	if m.nativeListCompact() {
-		// The list renders at CompactListWidth, so the manager gets the columns
-		// the list actually leaves behind — m.width - 20 - gutter — instead of
-		// the full-width reservation. This is the load-bearing T-052 fix.
-		tui = CompactListWidth
-	}
-	x := tui + paneGutter
+	x := m.nativeListWidth() + paneGutter
 	w := m.width - x
 	if w < 0 {
 		w = 0
