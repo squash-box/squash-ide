@@ -35,6 +35,9 @@ type paneManager interface {
 	CloseByTask(taskID string) error
 	// FocusByTask focuses the pane running taskID (notify-click focus).
 	FocusByTask(taskID string) error
+	// FocusedTaskID returns the task id of the focused pane, or "" if none is
+	// focused — used to record which pane the user dismissed with ctrl+w (T-048).
+	FocusedTaskID() string
 	// SetStateByTask drives the pane's border badge from the status pipeline.
 	SetStateByTask(taskID, state string)
 	// CanSpawn reports whether the region admits one more pane (spawn pre-flight).

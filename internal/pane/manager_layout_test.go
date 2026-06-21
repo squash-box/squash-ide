@@ -137,51 +137,49 @@ func TestFocusNextPrev_Wraps(t *testing.T) {
 	}
 }
 
-// TestFocusFollowsInput_On: a pane entering input_required becomes focused.
-func TestFocusFollowsInput_On(t *testing.T) {
+// TestSetStateByTask_BadgeOnly: SetStateByTask paints the input_required badge
+// but NEVER moves focus (T-048 badge-only contract). Focus-follows-input is
+// owned entirely by the UI; the manager has no view of user intent (modal open /
+// ctrl+w dismissal), so it must not seize focus on a state change. The
+// notify-click path (Focus/FocusByTask) is the only thing that moves focus.
+func TestSetStateByTask_BadgeOnly(t *testing.T) {
 	fake := newFakePTY(t)
-	m := NewManager(WithStarter(fake), WithFocusFollowsInput(true))
-	m.Resize(Rect{W: 400, H: 40})
-	spawnN(t, m, 2)
-
-	m.SetStateByTask("T-2", StateInputRequired)
-	if f := m.Focused(); f == nil || f.TaskID() != "T-2" {
-		t.Errorf("focus-follows-input: focused = %v, want T-2", f)
-	}
-}
-
-// TestFocusFollowsInput_Off: input_required updates the badge but does NOT steal
-// focus.
-func TestFocusFollowsInput_Off(t *testing.T) {
-	fake := newFakePTY(t)
-	m := NewManager(WithStarter(fake)) // ffi off (default)
+	m := NewManager(WithStarter(fake))
 	m.Resize(Rect{W: 400, H: 40})
 	panes := spawnN(t, m, 2)
 
-	m.SetStateByTask("T-2", StateInputRequired)
+	// Precondition: spawning does not auto-focus a pane.
 	if f := m.Focused(); f != nil {
-		t.Errorf("ffi off: focus = %s, want none (no steal)", f.ID())
+		t.Fatalf("precondition: focus = %s, want none after spawn", f.ID())
+	}
+
+	m.SetStateByTask("T-2", StateInputRequired)
+
+	if f := m.Focused(); f != nil {
+		t.Errorf("badge-only: focus = %s, want none (manager must not steal focus)", f.ID())
 	}
 	if panes[1].State() != StateInputRequired {
 		t.Errorf("badge not updated: state = %s, want input_required", panes[1].State())
 	}
 }
 
-// TestFocusFollowsInput_TwoSimultaneous: two panes paused near-simultaneously —
-// focus lands deterministically on the last, the other keeps its badge.
-func TestFocusFollowsInput_TwoSimultaneous(t *testing.T) {
+// TestSetStateByTask_TwoSimultaneous_BadgeOnly: two panes paused
+// near-simultaneously both get their badge and neither is focused — the manager
+// renders, the UI decides surfacing (T-048).
+func TestSetStateByTask_TwoSimultaneous_BadgeOnly(t *testing.T) {
 	fake := newFakePTY(t)
-	m := NewManager(WithStarter(fake), WithFocusFollowsInput(true))
+	m := NewManager(WithStarter(fake))
 	m.Resize(Rect{W: 400, H: 40})
 	panes := spawnN(t, m, 2)
 
 	m.SetStateByTask("T-1", StateInputRequired)
 	m.SetStateByTask("T-2", StateInputRequired)
-	if f := m.Focused(); f == nil || f.TaskID() != "T-2" {
-		t.Errorf("focus = %v, want the last paused pane T-2", f)
+
+	if f := m.Focused(); f != nil {
+		t.Errorf("badge-only: focus = %s, want none (no steal for either pane)", f.ID())
 	}
-	if panes[0].State() != StateInputRequired {
-		t.Errorf("T-1 lost its badge: state = %s, want input_required", panes[0].State())
+	if panes[0].State() != StateInputRequired || panes[1].State() != StateInputRequired {
+		t.Errorf("both badges should be input_required: T-1=%s T-2=%s", panes[0].State(), panes[1].State())
 	}
 }
 

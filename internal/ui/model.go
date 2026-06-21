@@ -109,6 +109,15 @@ type Model struct {
 	paneFocused  bool
 	layoutName   string // active native layout name (T-040); cycled by the 'L' key
 
+	// dismissedFocus records task ids whose input_required pane the user
+	// deliberately left via ctrl+w (T-048). While a task is in this set,
+	// focus-follows-input will not re-surface its *standing* prompt — so the
+	// user can stay on the list and spawn more tasks. An entry is cleared the
+	// moment the pane makes genuine progress out of input_required (a real new
+	// status report, not a transient gap), re-arming surfacing for the next,
+	// genuinely new prompt. Keyed by task id.
+	dismissedFocus map[string]bool
+
 	// MCP status polling
 	subStatuses map[string]status.File // keyed by task ID
 
@@ -128,16 +137,16 @@ type Model struct {
 // also constructs the in-process pane manager the right region renders.
 func New(cfg config.Config) Model {
 	m := Model{
-		cfg:          cfg,
-		vaultPath:    cfg.Vault,
-		needsRespawn: true,
+		cfg:            cfg,
+		vaultPath:      cfg.Vault,
+		needsRespawn:   true,
+		dismissedFocus: map[string]bool{},
 	}
 	if cfg.Engine == config.EngineNative {
 		m.engineNative = true
 		m.layoutName = cfg.Layout
 		m.manager = pane.NewManager(
 			pane.WithStrategy(pane.StrategyForName(cfg.Layout)),
-			pane.WithFocusFollowsInput(cfg.FocusFollowsInput),
 		)
 	}
 	return m
@@ -519,19 +528,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				case oldOK:
 					m.manager.SetStateByTask(t.ID, pane.StateIdle)
 				}
+				// Re-arm focus-follows-input once the pane makes genuine progress
+				// out of input_required (T-048). Only a *real* new report counts
+				// (newOK): the synthesised idle from an absent status entry
+				// (case oldOK above) is a transient gap, not progress, so a flap
+				// must not resurrect the standing prompt the user walked away from.
+				if newOK && oldOK && oldSub.State == pane.StateInputRequired && newSub.State != pane.StateInputRequired {
+					if m.dismissedFocus[t.ID] {
+						delete(m.dismissedFocus, t.ID)
+						uidebugf("focus dismissal re-armed -> %s", t.ID)
+					}
+				}
 				// Focus-follows-input (T-040): when a pane transitions into
 				// input_required, surface it in the TUI — the in-TUI dual of the
 				// [[T-034]] notification click. Gated on the transition (old state
-				// != input_required) so the user can toggle back to the list
-				// without focus being yanked every tick while the pane waits. The
-				// manager also focuses the pane; here we flip the UI's focus owner
-				// so keystrokes route to it, idempotent with the notify-click path.
+				// != input_required) so focus isn't yanked every tick while the
+				// pane waits. Suppressed when the user is mid-interaction (a modal
+				// is open — about to spawn task B) or has deliberately dismissed
+				// this pane with ctrl+w (T-048); the badge still updates via
+				// SetStateByTask above so the pane visibly shows it needs input.
 				if m.cfg.FocusFollowsInput && newOK && newSub.State == pane.StateInputRequired {
 					wasInput := oldOK && oldSub.State == pane.StateInputRequired
 					if !wasInput {
-						if err := m.manager.FocusByTask(t.ID); err == nil {
-							m.paneFocused = true
-							uidebugf("focus-follows-input -> %s", t.ID)
+						switch {
+						case m.inModalState():
+							uidebugf("focus-follows-input suppressed (modal) -> %s", t.ID)
+						case m.dismissedFocus[t.ID]:
+							uidebugf("focus-follows-input suppressed (dismissed) -> %s", t.ID)
+						default:
+							if err := m.manager.FocusByTask(t.ID); err == nil {
+								m.paneFocused = true
+								uidebugf("focus-follows-input -> %s", t.ID)
+							}
 						}
 					}
 				}
@@ -598,6 +626,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// inModalState reports whether a modal/dialog/form/filter/detail view currently
+// owns the keyboard — the exact precedence set handleKey checks before routing a
+// keystroke to the pane or list. Focus-follows-input (T-048) consults it so a
+// background pane pausing for input never yanks focus out from under the user
+// mid-interaction (e.g. while filling in the new-task form to spawn task B). Keep
+// this in sync with the dispatch order in handleKey below.
+func (m Model) inModalState() bool {
+	return m.creatingTask != nil ||
+		m.blocking != nil ||
+		m.completing != nil ||
+		m.deactivating != nil ||
+		m.confirming != nil ||
+		m.filterActive ||
+		m.view == detailView
+}
+
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// New-task form — takes precedence so keys (including the letters used
 	// elsewhere for list actions) don't leak into the list while the form
@@ -655,6 +699,17 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // encoder's documented gaps.
 func (m Model) handlePaneFocusedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if key.Matches(msg, keys.PaneFocus) {
+		// Record the pane the user is deliberately leaving so focus-follows-input
+		// stops re-surfacing its standing prompt (T-048). Cleared once the pane
+		// makes genuine progress out of input_required (see statusTickMsg). A nil
+		// map (tmux build) or no focused pane both no-op safely.
+		if id := m.manager.FocusedTaskID(); id != "" {
+			if m.dismissedFocus == nil {
+				m.dismissedFocus = map[string]bool{}
+			}
+			m.dismissedFocus[id] = true
+			uidebugf("focus dismissed -> %s", id)
+		}
 		m.paneFocused = false
 		uidebugf("focus -> list")
 		return m, nil
