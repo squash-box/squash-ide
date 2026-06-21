@@ -323,17 +323,23 @@ readout is a silent no-op (the header simply shows no stats). Set
 `pane_stats: false` (or `SQUASH_PANE_STATS=0`, or `--pane-stats false`) to turn
 the readout — and the 15s sampling tick — off entirely.
 
-**Task-creation popover.** Pressing `t` and submitting the new-task form hands
-off to the `/log-task` Claude skill. Under `engine: native` that interactive
-session runs in a **centered popover** composited *over* the tiled spawn region —
-the spawned panes stay visible, framed around the box, instead of the screen
-blanking to a fullscreen Claude takeover (which is what the tmux engine still
-does via `tea.ExecProcess`, and which under the native engine would look like
-squash-ide had crashed). Every keystroke — including `ctrl+c` (interrupt) and
-`ctrl+d` (finish) — goes to the popover's Claude session; when it exits the
-popover closes, focus returns to the list, and the new task appears. `ctrl+\` is
-a force-close hatch that dismisses a wedged popover and returns you to the list
-without quitting squash-ide.
+**Task-creation form + tabbed sessions.** Pressing `t` opens the new-task form;
+submitting it (`ctrl+d` from the prompt, or `enter` from a single-line field)
+hands off to the `/log-task` Claude skill. Under `engine: native` the form is a
+**floating modal** composited *over* the list and pane region — the list and any
+running panes stay visible behind it, instead of the screen blanking to a
+fullscreen takeover (which is what the tmux engine still does via
+`tea.ExecProcess`, and which under the native engine would look like squash-ide
+had crashed).
+
+Submitting launches the `/log-task` session as a **regular tab** (a native pane
+the responsive layout tiles like any spawn), then **clears the form** so you can
+enter the next task immediately while the modal stays open — so multiple
+`/log-task` sessions can run concurrently as you keep adding. When a session
+finishes (its Claude child exits) its tab **auto-closes** (unlike `/implement`
+panes, which remain on screen so you can read the PR URL), and the freshly-filed
+task appears in the list. `esc` closes the form modal; any running tabs keep
+going.
 
 ```bash
 squash-ide --engine native --layout responsive --focus-follows-input true

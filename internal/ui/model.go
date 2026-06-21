@@ -126,13 +126,11 @@ type Model struct {
 	// the single outstanding tickResources goroutine (no extra lock needed).
 	statsCollector *procstat.Collector
 
-	// logTaskPopover is true while the native-engine /log-task session runs in a
-	// centered popover pane composited over the spawn region (T-050). It is the
-	// modal-state marker: while set, every keystroke routes to the popover's
-	// claude child (handleLogTaskPopoverKey), and inModalState() reports true so
-	// focus-follows-input can't yank focus out from under it. Native engine only;
-	// the tmux/--no-tmux engines keep the tea.ExecProcess takeover.
-	logTaskPopover bool
+	// logTaskSeq mints unique synthetic task ids (log-task-N) for native-engine
+	// /log-task tabs (T-054). Each ctrl+d in the add-task form launches a regular
+	// pane keyed by the next id, so concurrent sessions stay distinct for the
+	// CloseByTask/DoneByTask auto-close watcher — they are not real vault tasks.
+	logTaskSeq int
 
 	// dismissedFocus records task ids whose input_required pane the user
 	// deliberately left via ctrl+w (T-048). While a task is in this set,
@@ -285,6 +283,14 @@ type logTaskDoneMsg struct{}
 
 type logTaskErrMsg struct {
 	err error
+}
+
+// logTaskTabDoneMsg is emitted (native engine) when a /log-task tab's claude
+// child exits, carrying the synthetic tab id so the handler can auto-close that
+// specific pane (T-054). Distinct from logTaskDoneMsg, which is the tmux
+// fullscreen path's single completion signal.
+type logTaskTabDoneMsg struct {
+	taskID string
 }
 
 func (m Model) loadTasks() tea.Msg {
@@ -496,23 +502,30 @@ func (m Model) runLogTask(f newTaskForm) tea.Cmd {
 	})
 }
 
-// startLogTaskNative is the native-engine counterpart of runLogTask: instead of
+// spawnLogTaskTab is the native-engine counterpart of runLogTask: instead of
 // suspending Bubble Tea and handing the whole terminal to claude (which under the
 // native engine looks like squash-ide crashed — every spawned pane vanishes), it
-// runs the interactive /log-task session in a centered popover pane composited
-// over the spawn region (T-050). The spawned panes stay visible behind it.
+// launches the interactive /log-task session as a regular pane that the
+// responsive layout tabs/tiles like any /implement spawn (T-054). Unlike the
+// superseded T-050 popover it is non-blocking: the add-task modal stays open and
+// multiple sessions can run as tabs concurrently, so it deliberately does NOT set
+// m.dispatching (that lock would block further adds).
 //
-// It mutates the receiver (pointer) — sets logTaskPopover / dispatching on
-// success — and returns the command that waits for the popover to finish. The
-// same buildLogTaskPrompt / cmd.Dir / LookPath pre-flight as the tmux path is
-// reused, so the two engines build a byte-identical claude invocation. A LookPath
-// or SpawnModal failure is wrapped and routed to logTaskErrMsg (no popover left
-// open, flags untouched), matching runLogTask's error contract.
-func (m *Model) startLogTaskNative(f newTaskForm) tea.Cmd {
+// Each session gets a unique synthetic task id (log-task-N) so the auto-close
+// watcher can address it via CloseByTask/DoneByTask — they are not real vault
+// tasks. The same buildLogTaskPrompt / cmd.Dir / LookPath pre-flight as the tmux
+// path is reused, so both engines build a byte-identical claude invocation.
+//
+// It mutates the receiver (the logTaskSeq counter, status) and returns the
+// command that watches the tab for exit, plus a bool reporting whether the pane
+// was spawned. A LookPath or Spawn failure is wrapped into logTaskErrMsg and
+// reports ok=false — no vault was mutated (nothing to roll back, unlike the Enter
+// spawn), so the caller keeps the form's contents for a retry.
+func (m *Model) spawnLogTaskTab(f newTaskForm) (tea.Cmd, bool) {
 	if _, err := lookPath("claude"); err != nil {
 		return func() tea.Msg {
 			return logTaskErrMsg{err: fmt.Errorf("claude CLI not found on PATH — install it to create tasks")}
-		}
+		}, false
 	}
 
 	prompt := buildLogTaskPrompt(f)
@@ -520,36 +533,42 @@ func (m *Model) startLogTaskNative(f newTaskForm) tea.Cmd {
 	// vault.ExpandHome resolves a leading `~` — the OS's chdir doesn't.
 	cmd.Dir = vault.ExpandHome(m.vaultPath)
 
-	box := m.popoverBox()
-	if _, err := m.manager.SpawnModal(pane.SpawnSpec{
+	m.logTaskSeq++
+	id := fmt.Sprintf("log-task-%d", m.logTaskSeq)
+	if _, err := m.manager.Spawn(pane.SpawnSpec{
 		Command: cmd,
-		TaskID:  "log-task",
-		Title:   "New task",
-	}, box); err != nil {
+		TaskID:  id,
+		Title:   strings.TrimSpace(f.name),
+		Project: strings.TrimSpace(f.repo),
+	}); err != nil {
 		return func() tea.Msg {
 			return logTaskErrMsg{err: fmt.Errorf("/log-task: %w", err)}
-		}
+		}, false
 	}
 
-	m.logTaskPopover = true
-	m.dispatching = true
-	m.statusMsg = "running /log-task..."
+	m.statusMsg = "/log-task running in a new tab"
 	m.statusIsErr = false
-	uidebugf("log-task popover opened")
-	// Watch for the child to exit (→ logTaskDoneMsg) and keep the right region
-	// repainting as claude draws into the popover.
-	return tea.Batch(m.waitForModalExit(), m.waitForPaneOutput())
+	uidebugf("log-task tab spawned %s", id)
+	// Watch only this tab for exit (→ logTaskTabDoneMsg). The single self-arming
+	// waitForPaneOutput loop started at init already repaints as claude draws, so
+	// concurrent tabs don't each add a competing listener on the coalescing
+	// repaint channel.
+	return m.waitForLogTaskExit(id), true
 }
 
-// waitForModalExit blocks on the modal pane's done channel and emits
-// logTaskDoneMsg when the /log-task child exits — the same success message
-// tea.ExecProcess's callback returns, so both engines feed one completion path.
-// Follows the pull-based, self-contained tea.Cmd idiom of waitForPaneOutput.
-func (m Model) waitForModalExit() tea.Cmd {
-	done := m.manager.ModalDone()
+// waitForLogTaskExit blocks on the /log-task tab's child-exit channel and emits
+// logTaskTabDoneMsg when claude exits, so the tab can auto-close (T-054). Mirrors
+// the deleted waitForModalExit, generalised to a task id. An unknown id yields a
+// nil channel → a nil (no-op) command that never parks a goroutine or emits a
+// spurious close.
+func (m Model) waitForLogTaskExit(taskID string) tea.Cmd {
+	done := m.manager.DoneByTask(taskID)
+	if done == nil {
+		return nil
+	}
 	return func() tea.Msg {
 		<-done
-		return logTaskDoneMsg{}
+		return logTaskTabDoneMsg{taskID: taskID}
 	}
 }
 
@@ -592,12 +611,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the last good geometry), so this is crash-safe on shrink.
 		if m.engineNative {
 			m.manager.Resize(m.rightRegion())
-			// Best-effort: keep the /log-task popover child sized to the recomputed
-			// centered box (T-050). A full live SIGWINCH reflow loop is a follow-up;
-			// this recompute covers the common terminal-resize case.
-			if m.logTaskPopover {
-				m.manager.ResizeModal(m.popoverBox())
-			}
+			// The add-task form is a pure overlay render (T-054) recomputed from
+			// m.width/m.height every View, so a resize needs no extra work here —
+			// unlike the superseded T-050 popover, which owned a PTY child to resize.
 			return m, nil
 		}
 		// Synchronous "too narrow" check — zoom/unzoom the TUI pane to
@@ -711,26 +727,37 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.loadTasks
 
 	case logTaskDoneMsg:
+		// tmux / --no-tmux only: the fullscreen tea.ExecProcess /log-task child
+		// exited. (Native uses the per-tab logTaskTabDoneMsg below instead.)
 		m.dispatching = false
-		// Native popover (T-050): the claude child exited — tear the popover down
-		// and clear the modal-state marker before reloading. CloseModal is a no-op
-		// if the popover was already force-closed with ctrl+\, so a double-close is
-		// safe.
-		if m.engineNative && m.logTaskPopover {
-			_ = m.manager.CloseModal()
-			m.logTaskPopover = false
-		}
 		m.statusMsg = "/log-task finished"
 		m.statusIsErr = false
 		m.resetCursorOnLoad = true
 		return m, m.loadTasks
 
+	case logTaskTabDoneMsg:
+		// Native (T-054): a /log-task tab's claude child exited — auto-close that
+		// pane (unlike the remain-on-exit /implement panes, [[T-035]]) and reload so
+		// the freshly-filed task appears in the list. CloseByTask is idempotent
+		// (unknown/closed id → clean no-op), so a force-closed or already-gone tab
+		// is safe. Deliberately leaves creatingTask alone: the add-task modal's
+		// lifecycle is independent of any one tab, and dispatching was never set.
+		if m.engineNative {
+			_ = m.manager.CloseByTask(msg.taskID)
+		}
+		m.statusMsg = "/log-task tab finished"
+		m.statusIsErr = false
+		m.resetCursorOnLoad = true
+		uidebugf("log-task tab %s finished", msg.taskID)
+		return m, m.loadTasks
+
 	case logTaskErrMsg:
+		// Reused by both engines: the tmux runLogTask pre-flight/exec error and the
+		// native spawnLogTaskTab LookPath/Spawn failure. The native add-task modal
+		// is left open (creatingTask untouched) so the user can retry; the tmux path
+		// already cleared the form at submit. No vault was mutated — nothing to roll
+		// back. dispatching is cleared for the tmux path (native never set it).
 		m.dispatching = false
-		m.creatingTask = nil
-		// A native SpawnModal/LookPath failure leaves no popover open; clear the
-		// marker defensively so a failed open can't trap the keyboard.
-		m.logTaskPopover = false
 		m.statusMsg = msg.err.Error()
 		m.statusIsErr = true
 		return m, nil
@@ -970,8 +997,7 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 // mid-interaction (e.g. while filling in the new-task form to spawn task B). Keep
 // this in sync with the dispatch order in handleKey below.
 func (m Model) inModalState() bool {
-	return m.logTaskPopover ||
-		m.creatingTask != nil ||
+	return m.creatingTask != nil ||
 		m.blocking != nil ||
 		m.completing != nil ||
 		m.deactivating != nil ||
@@ -981,14 +1007,6 @@ func (m Model) inModalState() bool {
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// Native /log-task popover (T-050) — top priority, ahead of pane focus and
-	// every dialog: while it is open the user is driving the claude session, so
-	// every key (ctrl+c interrupt and ctrl+d finish included) forwards to the
-	// child. The only squash-ide-level key is the ctrl+\ force-close hatch.
-	if m.logTaskPopover {
-		return m.handleLogTaskPopoverKey(msg)
-	}
-
 	// New-task form — takes precedence so keys (including the letters used
 	// elsewhere for list actions) don't leak into the list while the form
 	// is open.
@@ -1065,31 +1083,6 @@ func (m Model) handlePaneFocusedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if b := pane.EncodeKey(msg); b != nil && m.manager != nil {
 		_, _ = m.manager.WriteToFocused(b)
-	}
-	return m, nil
-}
-
-// handleLogTaskPopoverKey routes a keystroke to the native /log-task popover's
-// claude child while the popover owns the keyboard (T-050). Every mapped key is
-// re-encoded (pane.EncodeKey) and written to the child's PTY — including ctrl+c
-// (interrupt) and ctrl+d (finish), so the user drives the skill exactly as they
-// would a real terminal. The one squash-ide-level key is ctrl+\: a force-close
-// hatch so a wedged session can never trap the user (mirrors the "ctrl+c always
-// quits" safety rule in handlePaneFocusedKey). Closing it reloads the vault so
-// any task the skill did write still appears.
-func (m Model) handleLogTaskPopoverKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if msg.Type == tea.KeyCtrlBackslash {
-		_ = m.manager.CloseModal()
-		m.logTaskPopover = false
-		m.dispatching = false
-		m.statusMsg = "/log-task closed"
-		m.statusIsErr = false
-		m.resetCursorOnLoad = true
-		uidebugf("log-task popover force-closed (ctrl+\\)")
-		return m, m.loadTasks
-	}
-	if b := pane.EncodeKey(msg); b != nil && m.manager != nil {
-		_, _ = m.manager.WriteToModal(b)
 	}
 	return m, nil
 }
@@ -1204,18 +1197,26 @@ func (m Model) handleNewTaskKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.statusIsErr = true
 			return m, nil
 		}
-		// Hand off to /log-task. We clear the form state before running so
-		// the TTY handover is clean — tea.ExecProcess tears down the alt
-		// screen for the duration, and we want the list to be what renders
-		// underneath if anything flickers.
-		m.creatingTask = nil
-		// Native engine (T-050): run the session in a centered popover composited
-		// over the spawn region instead of the fullscreen tea.ExecProcess takeover
-		// (which would make the whole TUI look like it crashed). startLogTaskNative
-		// sets the dispatching/popover flags and status itself.
+		// Native engine (T-054): launch the /log-task session as a regular tab and
+		// keep the add-task modal open with a cleared form, so the user can queue
+		// more tasks while sessions run concurrently. No dispatching lock — the
+		// whole point is concurrent adds. Supersedes the T-050 blocking popover.
 		if m.engineNative {
-			return m, m.startLogTaskNative(form)
+			cmd, ok := m.spawnLogTaskTab(form)
+			if ok {
+				// Clear the form in place for the next entry; the modal stays open.
+				// On a spawn failure (ok == false) the form keeps its contents so
+				// the user can retry — see spawnLogTaskTab / logTaskErrMsg.
+				*m.creatingTask = newNewTaskForm()
+			}
+			return m, cmd
 		}
+		// tmux / --no-tmux: hand off to /log-task via the fullscreen
+		// tea.ExecProcess takeover. We clear the form state before running so the
+		// TTY handover is clean — tea.ExecProcess tears down the alt screen for the
+		// duration, and we want the list to be what renders underneath if anything
+		// flickers.
+		m.creatingTask = nil
 		m.dispatching = true
 		m.statusMsg = "running /log-task..."
 		m.statusIsErr = false
@@ -1792,8 +1793,11 @@ func (m Model) listViewRender() string {
 
 	// New-task form takes over the whole pane — there's usually a lot of
 	// information to enter (particularly the prompt), so the bottom-overlay
-	// pattern used for simple y/N dialogs isn't enough.
-	if m.creatingTask != nil {
+	// pattern used for simple y/N dialogs isn't enough. Native engine only floats
+	// the form as a centered overlay (nativeView composites it over the list +
+	// panes, T-054), so the fullscreen takeover is gated to the tmux/--no-tmux
+	// path — under native this block must not replace the list.
+	if !m.engineNative && m.creatingTask != nil {
 		formHeight := m.height - 2 // leave room for the status bar + help
 		if formHeight < 16 {
 			formHeight = 16
