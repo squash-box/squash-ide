@@ -3,25 +3,26 @@ package ui
 import "github.com/charmbracelet/bubbles/key"
 
 type keyMap struct {
-	Up          key.Binding
-	Down        key.Binding
-	Enter       key.Binding
-	Detail      key.Binding
-	Back        key.Binding
-	Filter      key.Binding
-	Refresh     key.Binding
-	Quit        key.Binding
-	Confirm     key.Binding
-	Deny        key.Binding
-	Complete    key.Binding
-	Block       key.Binding
-	Deactivate  key.Binding
-	NewTask     key.Binding
-	PaneFocus   key.Binding
-	CycleLayout key.Binding
-	NextTab     key.Binding
-	PrevTab     key.Binding
-	Collapse    key.Binding
+	Up           key.Binding
+	Down         key.Binding
+	Enter        key.Binding
+	Detail       key.Binding
+	Back         key.Binding
+	Filter       key.Binding
+	Refresh      key.Binding
+	Quit         key.Binding
+	Confirm      key.Binding
+	Deny         key.Binding
+	Complete     key.Binding
+	Block        key.Binding
+	Deactivate   key.Binding
+	NewTask      key.Binding
+	PaneFocus    key.Binding
+	CycleLayout  key.Binding
+	NextTab      key.Binding
+	PrevTab      key.Binding
+	Collapse     key.Binding
+	CollapseList key.Binding
 }
 
 var keys = keyMap{
@@ -103,5 +104,12 @@ var keys = keyMap{
 	Collapse: key.NewBinding(
 		key.WithKeys("z"),
 		key.WithHelp("z", "collapse pane"),
+	),
+	// CollapseList toggles the native task list between its responsive width and
+	// its compact floor (CompactListWidth), handing the freed columns to the pane
+	// region. List mode only (like L/[/]/z); forwarded to a focused pane's child.
+	CollapseList: key.NewBinding(
+		key.WithKeys("ctrl+b"),
+		key.WithHelp("ctrl+b", "collapse list"),
 	),
 }

@@ -290,6 +290,15 @@ Keyboard controls (list mode, native engine only):
 | `]`   | focus next tab/pane                                      |
 | `[`   | focus previous tab/pane                                  |
 | `z`   | collapse / expand the focused pane to a thin strip       |
+| `ctrl+b` | collapse / expand the **task list** to its compact (20-col) width, handing the freed columns to the panes |
+
+`ctrl+b` is a manual override of the space-driven list width above: on a wide
+terminal the list parks at its full width, and `ctrl+b` snaps it to the 20-col
+compact strip on demand so a spawned pane gets the recovered columns; a second
+press restores the responsive width. The list stays visible and navigable in its
+compact card form, so collapsing never loses context. (Native engine only —
+under `engine: tmux`, `ctrl+b` is tmux's own session prefix and never reaches
+the TUI.)
 
 **Focus-follows-input.** With `focus_follows_input: true` (the default,
 `--focus-follows-input` flag / `SQUASH_FOCUS_FOLLOWS_INPUT` env), a pane that
