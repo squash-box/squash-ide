@@ -28,17 +28,19 @@ type Responsive struct{}
 const responsiveColumnMinWidth = 100
 
 // Arrange implements Strategy by delegating to the sub-strategy chosen for this
-// region/n/constraints.
+// region/n/constraints. Called only when Responsive is used directly (no
+// collapse context), so it resolves with nCollapsed 0.
 func (r Responsive) Arrange(region Rect, n int, c Constraints) ([]Rect, error) {
-	s, _ := r.resolve(region, n, c)
+	s, _ := r.resolve(region, n, c, 0)
 	return s.Arrange(region, n, c)
 }
 
 // resolve picks the concrete sub-strategy (and the axis the Manager composes it
-// along) for the given region. columns → stack → tabs, taking the first that
-// fits; tabs is the always-succeeds fallback that delivers the reflow-never-
-// reject guarantee.
-func (r Responsive) resolve(region Rect, n int, c Constraints) (Strategy, layoutAxis) {
+// along) for the given region: columns → main+stack → stack → tabs, taking the
+// first that fits; tabs is the always-succeeds fallback that delivers the
+// reflow-never-reject guarantee. nCollapsed gates the main+stack hybrid, whose
+// 2-D geometry the collapse-strip reflow doesn't model.
+func (r Responsive) resolve(region Rect, n int, c Constraints, nCollapsed int) (Strategy, layoutAxis) {
 	if n <= 0 {
 		return FlexColumns{}, axisColumns
 	}
@@ -54,6 +56,16 @@ func (r Responsive) resolve(region Rect, n int, c Constraints) (Strategy, layout
 	}
 	if _, err := (FlexColumns{}).Arrange(region, n, colC); err == nil {
 		return FlexColumns{}, axisColumns
+	}
+	// Before collapsing to a pure vertical stack, try the main+stack hybrid: one
+	// full-height pane beside a column of the rest. Needs 3+ panes (n==2
+	// degenerates to two columns, already handled above) and the same wider
+	// per-pane width bar as columns. Skipped while any pane is collapsed — the
+	// 2-D layout has no strip-reflow path (v1).
+	if n >= 3 && nCollapsed == 0 {
+		if _, err := (MainStack{}).Arrange(region, n, colC); err == nil {
+			return MainStack{}, axisMainStack
+		}
 	}
 	if _, err := (StackRows{}).Arrange(region, n, c); err == nil {
 		return StackRows{}, axisRows

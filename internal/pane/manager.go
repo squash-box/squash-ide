@@ -278,13 +278,15 @@ func (m *Manager) CanSpawn() bool {
 		return true
 	}
 	n := len(m.panes) + 1
-	concrete, axis := resolveStrategy(m.strategy, region, n, m.constraints)
+	// The prospective pane spawns expanded; existing collapsed panes stay strips.
+	nCollapsed := countCollapsed(m.panes, m.collapsed)
+	concrete, axis := resolveStrategy(m.strategy, region, n, m.constraints, nCollapsed)
 	if axis == axisTabbed {
 		_, err := concrete.Arrange(region, n, m.constraints)
 		return err == nil
 	}
-	// The prospective pane spawns expanded; existing collapsed panes stay strips.
-	nCollapsed := countCollapsed(m.panes, m.collapsed)
+	// axisMainStack only resolves when nCollapsed == 0, so reduceRegion is a
+	// no-op there and this fits the whole region — the same call columns/rows use.
 	_, err := concrete.Arrange(reduceRegion(region, nCollapsed, axis, m.constraints), n-nCollapsed, m.constraints)
 	return err == nil
 }
@@ -550,6 +552,9 @@ func (m *Manager) Render(region Rect) string {
 	}
 	if axis == axisTabbed {
 		return composeTabs(region, panes, rects, focusID, blink)
+	}
+	if axis == axisMainStack {
+		return composeMainStack(panes, rects, focusID, gutter, blink)
 	}
 	return composeLinear(axis, panes, rects, collapsed, focusID, gutter, blink)
 }
