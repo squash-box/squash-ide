@@ -24,7 +24,8 @@ type stubManager struct {
 
 	// T-039 lifecycle recording.
 	spawned     []pane.SpawnSpec
-	spawnErr    error // when set, Spawn returns it (exercises the rollback path)
+	spawnErr    error            // when set, Spawn returns it (exercises the rollback path)
+	spawnErrFor map[string]error // per-task Spawn error (T-049 partial-failure respawn)
 	closedTasks []string
 	focusedTask string
 	focusErr    error             // when set, FocusByTask returns it (pane died between tick and focus)
@@ -60,6 +61,9 @@ func (s *stubManager) Repaint() <-chan struct{} { return s.repaint }
 
 func (s *stubManager) Spawn(spec pane.SpawnSpec) (*pane.Pane, error) {
 	s.spawned = append(s.spawned, spec)
+	if err, ok := s.spawnErrFor[spec.TaskID]; ok {
+		return nil, err
+	}
 	if s.spawnErr != nil {
 		return nil, s.spawnErr
 	}

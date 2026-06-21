@@ -410,12 +410,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.engineNative && tmux.InSession() {
 			m.checkCompactPane(tmux.CurrentPaneID())
 		}
-		// On the first load, respawn tmux panes for active tasks (or
-		// create the placeholder). Done here rather than before the TUI
-		// starts so the session is fully attached and sized.
-		if m.needsRespawn && m.RespawnFunc != nil {
-			m.needsRespawn = false
-			m.RespawnFunc(m.allTasks)
+		// On the first load, respawn panes for active tasks left over from a
+		// prior session. Done here rather than before the TUI starts so the
+		// session is fully attached and sized. The two engines diverge: tmux
+		// shells out via the RespawnFunc callback (set only on the tmux path in
+		// main.go, also creating the placeholder); native spawns into the
+		// in-process manager, which is owned by this tea.Program and so can only
+		// be driven from the UI goroutine (T-049).
+		if m.needsRespawn {
+			if m.engineNative {
+				m.needsRespawn = false
+				m.respawnActivePanes()
+			} else if m.RespawnFunc != nil {
+				m.needsRespawn = false
+				m.RespawnFunc(m.allTasks)
+			}
 		}
 		return m, tea.ClearScreen
 
