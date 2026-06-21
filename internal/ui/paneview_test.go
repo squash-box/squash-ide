@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/squashbox/squash-ide/internal/config"
 	"github.com/squashbox/squash-ide/internal/pane"
 	"github.com/squashbox/squash-ide/internal/status"
@@ -314,13 +315,15 @@ func TestNativeFocusToggle_CtrlCQuits(t *testing.T) {
 	}
 }
 
-// A terminal narrower than TUIWidth + gutter + min pane renders the native
-// too-narrow overlay rather than shelling tmux.
+// A terminal narrower than CompactListWidth + gutter + min pane (61) renders the
+// native too-narrow overlay rather than shelling tmux. Post-T-052 the floor is
+// the *compact* list, so the width must sit below 61 (not merely below the
+// full-list floor of 101 — that band now compacts instead of overlaying).
 func TestNativeView_TooNarrow(t *testing.T) {
 	mgr := newStubManager()
 	mgr.renderOut = "PANE-REGION-SENTINEL"
 	m := nativeModel(t, mgr)
-	m.width = m.tuiWidth() + 5 // well below tui + gutter + nativeMinPaneWidth
+	m.width = CompactListWidth + 5 // 25 — below the compact floor of 61
 
 	view := m.View()
 	if !strings.Contains(view, "too narrow") {
@@ -328,6 +331,60 @@ func TestNativeView_TooNarrow(t *testing.T) {
 	}
 	if strings.Contains(view, "PANE-REGION-SENTINEL") {
 		t.Error("too-narrow overlay should not render the pane region")
+	}
+}
+
+// T-052: in the compaction band (61 <= width < 101) the native list collapses to
+// CompactListWidth and the manager gets the recovered columns, instead of the
+// too-narrow overlay that pre-T-052 fired for everything under 101.
+func TestNativeView_CompactsInBand(t *testing.T) {
+	mgr := newStubManager()
+	mgr.renderOut = "PANE-REGION-SENTINEL"
+	m := nativeModel(t, mgr)
+	m.width = 90 // between the compact floor (61) and the full-list floor (101)
+
+	if !m.nativeListCompact() {
+		t.Fatal("nativeListCompact() should be true at width=90")
+	}
+
+	// rightRegion now reflects the compact list: W == 90-20-1, X == 21.
+	rr := m.rightRegion()
+	if rr.W != 90-CompactListWidth-paneGutter {
+		t.Errorf("rightRegion().W = %d, want %d", rr.W, 90-CompactListWidth-paneGutter)
+	}
+	if rr.X != CompactListWidth+paneGutter {
+		t.Errorf("rightRegion().X = %d, want %d", rr.X, CompactListWidth+paneGutter)
+	}
+
+	// The view composes the list + pane region (sentinel present), not the overlay.
+	view := m.View()
+	if strings.Contains(view, "too narrow") {
+		t.Error("compaction band should not render the too-narrow overlay")
+	}
+	if !strings.Contains(view, "PANE-REGION-SENTINEL") {
+		t.Error("compaction band should render the manager's pane region")
+	}
+}
+
+// T-052: the native list renders at CompactListWidth (compact top bar + cards)
+// when nativeListCompact() is true — every line within the 20-col budget.
+func TestNativeListViewRender_CompactInBand(t *testing.T) {
+	mgr := newStubManager()
+	m := nativeModel(t, mgr)
+	m.width = 90
+	if !m.nativeListCompact() {
+		t.Fatal("precondition: should be compact at width=90")
+	}
+
+	out := m.listViewRender()
+	if !strings.Contains(out, "sq") {
+		t.Errorf("expected compact top bar stub 'sq' in native compact list: %q", out)
+	}
+	for i, line := range strings.Split(out, "\n") {
+		if w := lipgloss.Width(line); w > CompactListWidth {
+			t.Errorf("native compact list line %d width %d exceeds %d: %q",
+				i, w, CompactListWidth, line)
+		}
 	}
 }
 

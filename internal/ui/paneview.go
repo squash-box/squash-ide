@@ -92,6 +92,12 @@ const nativeMinPaneWidth = 40
 // (W == width - TUIWidth - gutter).
 func (m Model) rightRegion() pane.Rect {
 	tui := m.tuiWidth()
+	if m.nativeListCompact() {
+		// The list renders at CompactListWidth, so the manager gets the columns
+		// the list actually leaves behind — m.width - 20 - gutter — instead of
+		// the full-width reservation. This is the load-bearing T-052 fix.
+		tui = CompactListWidth
+	}
 	x := tui + paneGutter
 	w := m.width - x
 	if w < 0 {
@@ -120,8 +126,11 @@ func (m Model) tuiWidth() int {
 // pane it shows a "too narrow" overlay instead — the native analogue of the
 // tmux tooNarrow view, with no tmux shell-out.
 func (m Model) nativeView() string {
-	tui := m.tuiWidth()
-	needed := tui + paneGutter + nativeMinPaneWidth
+	// The floor is the compact list, not the full list: a terminal that can't
+	// fit a full-width list still renders if it can fit a compact (20-col) list
+	// plus a usable pane region. rightRegion/listViewRender collapse the list
+	// to match. The overlay only fires below the compact floor (61 cols).
+	needed := CompactListWidth + paneGutter + nativeMinPaneWidth
 	if m.width > 0 && m.width < needed {
 		return m.nativeTooNarrowView(needed)
 	}
