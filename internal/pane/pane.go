@@ -30,6 +30,7 @@ package pane
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"sync"
 
@@ -82,9 +83,17 @@ type Pane struct {
 	dead   bool
 	closed bool
 
-	setsize func(rows, cols uint16) error // window-size ioctl via the manager's seam
-	notify  func()                        // repaint hook, invoked on output and state change
-	done    chan struct{}                 // closed when the read goroutine exits
+	setsize   func(rows, cols uint16) error // window-size ioctl via the manager's seam
+	notify    func()                        // repaint hook, invoked on output and state change
+	done      chan struct{}                 // closed when the read goroutine exits
+	replyDone chan struct{}                 // closed when the reply-pump goroutine exits
+
+	// replyW is the write end of the emulator's reply pipe (emu.InputPipe). The
+	// emulator writes query replies into it and replyPump drains the read end;
+	// closing it EOFs that read so the pump exits at teardown. We close this
+	// directly rather than emu.Close() because emu.Close mutates an unsynchronised
+	// `closed` flag that emu.Read also reads — a data race the pump would trip.
+	replyW io.Closer
 }
 
 // newPane builds a Pane around an already-started master/process and launches
@@ -105,22 +114,30 @@ func newPane(id, taskID, title, project string, master *os.File, proc Process, c
 	if setsize == nil {
 		setsize = func(uint16, uint16) error { return nil }
 	}
+	emu := vt.NewEmulator(cols, rows)
 	p := &Pane{
-		id:      id,
-		taskID:  taskID,
-		title:   title,
-		project: project,
-		master:  master,
-		proc:    proc,
-		emu:     vt.NewEmulator(cols, rows),
-		cols:    cols,
-		rows:    rows,
-		state:   StateWorking,
-		setsize: setsize,
-		notify:  notify,
-		done:    make(chan struct{}),
+		id:        id,
+		taskID:    taskID,
+		title:     title,
+		project:   project,
+		master:    master,
+		proc:      proc,
+		emu:       emu,
+		cols:      cols,
+		rows:      rows,
+		state:     StateWorking,
+		setsize:   setsize,
+		notify:    notify,
+		done:      make(chan struct{}),
+		replyDone: make(chan struct{}),
+	}
+	// The emulator's reply pipe write end (an *io.PipeWriter). Closing it at
+	// teardown EOFs replyPump's Read without touching emu's racy closed flag.
+	if c, ok := emu.InputPipe().(io.Closer); ok {
+		p.replyW = c
 	}
 	go p.readLoop()
+	go p.replyPump()
 	return p
 }
 
@@ -329,6 +346,32 @@ func (p *Pane) readLoop() {
 	}
 }
 
+// replyPump drains the emulator's reply stream and writes it back to the child's
+// PTY master. A vt emulator answers terminal-capability queries — Device
+// Attributes (CSI c / CSI > c), cursor-position / Device Status reports (CSI 6 n),
+// OSC color queries — by writing the reply into an internal, *synchronous*
+// io.Pipe (vt's emulator.go). That write BLOCKS until the reply is read out, and
+// readLoop feeds the emulator under p.mu: an undrained reply therefore freezes
+// readLoop mid-write while holding p.mu, which deadlocks Render (and so the whole
+// Bubble Tea event loop — keyboard input and ctrl+c included). An interactive
+// child like Claude Code emits these queries at startup, so the freeze hit the
+// instant a task was spawned. Draining here both unblocks the writer and
+// correctly delivers the answer to the child. It exits when Pane.Close closes the
+// reply pipe (p.replyW), EOFing the reply stream.
+func (p *Pane) replyPump() {
+	defer close(p.replyDone)
+	buf := make([]byte, 256)
+	for {
+		n, err := p.emu.Read(buf)
+		if n > 0 {
+			_, _ = p.master.Write(buf[:n]) // best-effort; a closed master just errors
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
 // markDead freezes the pane in StateDead. Idempotent.
 func (p *Pane) markDead() {
 	p.mu.Lock()
@@ -358,7 +401,11 @@ func (p *Pane) Close() error {
 	if master != nil {
 		_ = master.Close() // unblocks the read goroutine
 	}
-	<-p.done // wait for readLoop to stop before returning
+	if p.replyW != nil {
+		_ = p.replyW.Close() // EOFs the reply stream so replyPump exits
+	}
+	<-p.done      // wait for readLoop to stop before returning
+	<-p.replyDone // and the reply pump, so no goroutine touches the emulator after
 	if proc != nil {
 		_ = proc.Wait() // reap so we don't leak a zombie
 	}
